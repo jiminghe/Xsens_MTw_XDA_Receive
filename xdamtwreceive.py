@@ -35,7 +35,7 @@ from threading import Lock
 import xsensdeviceapi as xda #for windows only
 import keyboard
 
-#remove teh added path after importing(optional)
+#remove the added path after importing(optional)
 #sys.path.pop(0)
 
 
