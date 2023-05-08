@@ -10,7 +10,8 @@ It was tested with Python 3.8 in Windows 11 and ubuntu 20.04(VirtualBox) with **
 pip install keyboard
 ```
 
-Xsens Device API is needed, which is included in the **MT Software Suit**e MT SDK folder, download from https://www.movella.com/support/software-documentation
+Xsens Device API is needed, which is included in the **MT Software Suite 2022**(under the MTi Products, see below picture) MT SDK folder, download from https://www.movella.com/support/software-documentation
+![Alt text](MT_Software_Suite_2022.png)
 ```
 pip install xsensdeviceapi-2022.0.0-cp38-none-linux_x86_64.whl
 ```
