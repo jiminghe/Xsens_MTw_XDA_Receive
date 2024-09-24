@@ -10,10 +10,12 @@ It was tested with Python 3.8 in Windows 11 and ubuntu 20.04(VirtualBox) with **
 pip install keyboard
 ```
 
-Xsens Device API is needed, which is included in the **MT Software Suite 2022**(under the MTi Products, see below picture) MT SDK folder, download from https://www.movella.com/support/software-documentation
-![Alt text](MT_Software_Suite_2022.png)
+Xsens Device API is needed, which is included in the MT SDK folder of **MT Software Suite 2022.2**(under the MTw Awinda section, see below picture), download from
+https://www.movella.com/support/software-documentation
+
+![Alt text](MT_Software_Suite_2022.2.png)
 ```
-pip install xsensdeviceapi-2022.0.0-cp38-none-linux_x86_64.whl
+pip install xsensdeviceapi-2022.2.0-cp38-none-win_amd64.whl
 ```
 In ubuntu, you may need to uncomment these lines, because there might be error: _no Modules found_:
 ```
