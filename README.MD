@@ -4,6 +4,8 @@ This Python example was based on the _MTSDK/examples/mtsdk/xda_cpp/example_mtw.c
 
 It was tested with Python 3.8 in Windows 11 and ubuntu 20.04(VirtualBox) with **Awinda Dongle** and 4 MTw sensors(or Xsens DOT Pro).
 
+### Note:
+For the MATLAB version, please go the the [`matlab`](https://github.com/jiminghe/Xsens_MTw_XDA_Receive/tree/matlab) branch
 
 ### Dependencies:
 ```
