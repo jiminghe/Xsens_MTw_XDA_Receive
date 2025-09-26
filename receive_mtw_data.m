@@ -95,6 +95,9 @@ else
 end
 fprintf('\n Found %s on port %s, with ID: %s and baudRate: %.0f \n',devTypeStr, portS, dec2hex(h.XsDeviceId_toInt(deviceID)), baudRate);
 
+% call log function.
+log_utils('init');
+
 % open port
 if ~h.XsControl_openPort(portS, baudRate, 0 ,true)
 	fprintf('\n Unable to open port %s. \n', portS);
@@ -238,39 +241,36 @@ stopAll;
 			end
 			
 			if dataPacket
-				if h.XsDataPacket_containsPacketCounter(dataPacket) && h.XsDataPacket_containsOrientation(dataPacket) && h.XsDataPacket_containsCalibratedData(dataPacket) && h.XsDataPacket_containsFreeAcceleration(dataPacket)
-                    deviceId = devIdUsed{iDev};
-                    fprintf('Device %s: ', deviceId);
-
-                    % packet counter
-                    packetCounter = h.XsDataPacket_packetCounter(dataPacket);
-                    fprintf('packetCounter=%u; ', packetCounter);              
-                    
-                    eulerAngles = cell2mat(h.XsDataPacket_orientationEuler_1(dataPacket));
+				if h.XsDataPacket_containsPacketCounter(dataPacket) && ...
+				h.XsDataPacket_containsOrientation(dataPacket) && ...
+				h.XsDataPacket_containsCalibratedData(dataPacket) && ...
+				h.XsDataPacket_containsFreeAcceleration(dataPacket)
+					
+					deviceId = devIdUsed{iDev};
+					
+					% Extract all data
+					packetCounter = h.XsDataPacket_packetCounter(dataPacket);
+					eulerAngles = cell2mat(h.XsDataPacket_orientationEuler_1(dataPacket));
+					quat = cell2mat(h.XsDataPacket_orientationQuaternion_1(dataPacket));
+					acc = cell2mat(h.XsDataPacket_calibratedAcceleration(dataPacket));
+					gyr = cell2mat(h.XsDataPacket_calibratedGyroscopeData(dataPacket)) * (180/pi);
+					mag = cell2mat(h.XsDataPacket_calibratedMagneticField(dataPacket));
+					freeAcc = cell2mat(h.XsDataPacket_freeAcceleration(dataPacket));
+					status = h.XsDataPacket_status(dataPacket);
+					
+					% Log data using log_utils - THIS IS THE KEY CHANGE
+					log_utils('log', deviceId, packetCounter, eulerAngles, quat, acc, gyr, mag, freeAcc, status);
+					
+					% Display data (optional - you can comment this out if you don't want console output)
+					fprintf('Device %s: ', deviceId);
+					fprintf('packetCounter=%u; ', packetCounter);              
 					fprintf('Roll=%.2f, Pitch=%.2f, Yaw=%.2f; ', eulerAngles(1), eulerAngles(2), eulerAngles(3));
-
-                    quat = cell2mat(h.XsDataPacket_orientationQuaternion_1(dataPacket));
-                    fprintf('QuatW=%.2f, QuatX=%.2f, QuatY=%.2f, QuatZ=%.2f; ', quat(1), quat(2), quat(3), quat(4));
-
-                    % Acceleration, m/s^2
-                    acc = cell2mat(h.XsDataPacket_calibratedAcceleration(dataPacket));
-                    fprintf('AccX=%.2f, AccY=%.2f, AccZ=%.2f; ', acc(1), acc(2), acc(3));
-
-                    % Gyroscope(rad/sec), convert to deg/s
-                    gyr = cell2mat(h.XsDataPacket_calibratedGyroscopeData(dataPacket))* (180/pi);
-                    fprintf('GyrX=%.4f, GyrY=%.4f, GyrZ=%.4f; ', gyr(1), gyr(2), gyr(3));
-                    
-                    % Magnetometer, arbitray unit(a.u.)
-                    mag = cell2mat(h.XsDataPacket_calibratedMagneticField(dataPacket));
-                    fprintf('MagX=%.2f, MagY=%.2f, MagZ=%.2f; ', mag(1), mag(2), mag(3));
-
-                    % Free Acceleration, m/s^2
-                    freeAcc = cell2mat(h.XsDataPacket_freeAcceleration(dataPacket));
-                    fprintf('FreeAccX=%.2f, FreeAccY=%.2f, FreeAccZ=%.2f; ', freeAcc(1), freeAcc(2), freeAcc(3));
-
-                    % Status
-                    status = h.XsDataPacket_status(dataPacket);
-                    fprintf('status=%u;\n', status);    
+					fprintf('QuatW=%.2f, QuatX=%.2f, QuatY=%.2f, QuatZ=%.2f; ', quat(1), quat(2), quat(3), quat(4));
+					fprintf('AccX=%.2f, AccY=%.2f, AccZ=%.2f; ', acc(1), acc(2), acc(3));
+					fprintf('GyrX=%.4f, GyrY=%.4f, GyrZ=%.4f; ', gyr(1), gyr(2), gyr(3));
+					fprintf('MagX=%.2f, MagY=%.2f, MagZ=%.2f; ', mag(1), mag(2), mag(3));
+					fprintf('FreeAccX=%.2f, FreeAccY=%.2f, FreeAccZ=%.2f; ', freeAcc(1), freeAcc(2), freeAcc(3));
+					fprintf('status=%u;\n', status);    
 				end
 				
 				h.dataPacketHandled(deviceFound, dataPacket);
@@ -286,13 +286,19 @@ stopAll;
 			h.unregisterevent({'onLiveDataAvailable',@handleData});
 			h.setCallbackOption(h.XsComCallbackOptions_XSC_None, h.XsComCallbackOptions_XSC_LivePacket);
 		end
+		
+		% Close the CSV log file using log_utils
+		log_utils('close');
+		
 		% stop data streaming, go to config mode
 		fprintf('\n Stop data streaming, go to config mode \n');
 		h.XsDevice_gotoConfig(device);
+		
 		% disable radio for station or dongle
 		if any(isStation|isDongle)
 			h.XsDevice_disableRadio(device);
 		end
+		
 		% on close, devices go to config mode.
 		fprintf('\n Close port \n');
 		% close port
