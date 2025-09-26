@@ -64,10 +64,11 @@ fprintf( '\n Connection ports - scanned \n' );
 isMtw = cellfun(@(x) h.XsDeviceId_isMtw(x),p_br(:,1));
 isDongle = cellfun(@(x) h.XsDeviceId_isAwindaXDongle(x),p_br(:,1));
 isStation = cellfun(@(x) h.XsDeviceId_isAwindaXStation(x),p_br(:,1));
+isWirelessMaster = cellfun(@(x) h.XsDeviceId_isWirelessMaster(x),p_br(:,1));
 
-if any(isDongle|isStation)
-	fprintf('\n Example dongle or station\n')
-	dev = find(isDongle|isStation);
+if any(isDongle|isStation|isWirelessMaster)
+	fprintf('\n Found wireless master device\n')
+	dev = find(isDongle|isStation|isWirelessMaster);
 	isMtw = false; % if a station or a dongle is connected give priority to it.
 elseif any(isMtw)
 	fprintf('\n Example MTw\n')
@@ -89,9 +90,10 @@ if any(isMtw)
 	devTypeStr = 'MTw';
 elseif any(isDongle)
 	devTypeStr = 'dongle';
-else
-	assert(any(isStation))
+elseif any(isStation)
 	devTypeStr = 'station';
+else
+	devTypeStr = 'wireless master';
 end
 fprintf('\n Found %s on port %s, with ID: %s and baudRate: %.0f \n',devTypeStr, portS, dec2hex(h.XsDeviceId_toInt(deviceID)), baudRate);
 
@@ -110,9 +112,16 @@ end
 % get device handle.
 device = h.XsControl_device(deviceID);
 
+% Go to config mode first
+fprintf('\n Setting config mode...\n');
+if ~h.XsDevice_gotoConfig(device)
+	fprintf('\n Failed to goto config mode\n');
+	stopAll;
+	return;
+end
+
 % To be able to get orientation data from a MTw, the filter in the
 % software needs to be turned on:
-h.XsDevice_gotoConfig(device);
 h.XsDevice_setOptions(device, h.XsOption_XSO_Orientation + h.XsOption_XSO_Calibrate, 0);
 
 % Get the list of supported update rates and let the user choose the
@@ -133,7 +142,18 @@ end
 % set the choosen update rate
 h.XsDevice_setUpdateRate(device, supportUpdateRates{upRateIndex});
 
-if(any(isDongle|isStation))
+if(any(isDongle|isStation|isWirelessMaster))
+	% Disable radio if previously enabled (important step)
+	fprintf('\n Disabling radio channel if previously enabled...\n');
+	if h.XsDevice_isRadioEnabled(device)
+		try
+			h.XsDevice_disableRadio(device);
+			pause(1); % Wait a moment for radio to disable
+		catch
+			fprintf(' Warning: Could not disable radio\n');
+		end
+	end
+	
 	% Let the user choose the desired radio channel
 	availableRadioChannels = [11 12 13 14 15 16 17 18 19 20 21 22 23 24 25];
 	upRadioChIndex = [];
@@ -148,23 +168,78 @@ if(any(isDongle|isStation))
 		upRadioChIndex = find(availableRadioChannels == selectedRadioCh);
 	end
 	
+	% enable radio with selected channel
+	fprintf('\n Enabling radio on channel %d...\n', availableRadioChannels(upRadioChIndex));
 	try
-		% enable radio
-		h.XsDevice_enableRadio(device, availableRadioChannels(upRadioChIndex));
-	catch
-		fprintf(' Radio is still turned on, remove device from pc and try again')
-	end % if radio is still on, this call will give an error
+		if ~h.XsDevice_enableRadio(device, availableRadioChannels(upRadioChIndex))
+			fprintf(' Failed to enable radio\n');
+			stopAll;
+			return;
+		end
+	catch ME
+		fprintf(' Error enabling radio: %s\n', ME.message);
+		stopAll;
+		return;
+	end
 	
 	input('\n Undock the MTw devices from the Awinda station and wait until the devices are connected (synced leds), then press enter... \n');
 	
-	% check which devices are found
-	children = h.XsDevice_children(device);
+	% Wait for wireless connections with better timeout handling
+	fprintf('\n Waiting for MTw devices to connect wirelessly...\n');
+	maxWaitTime = 30; % seconds
+	waitStart = tic;
+	connectedDevices = [];
 	
-	% make sure at least one sensor is connected.
-	devIdAll = cellfun(@(x) dec2hex(h.XsDeviceId_toInt(h.XsDevice_deviceId(x))),children,'uniformOutput', false);
+	while toc(waitStart) < maxWaitTime
+		% Get children devices from the master device (this is the correct approach)
+		children = h.XsDevice_children(device);
+		
+		% Filter for wirelessly connected MTw devices
+		connectedDevices = [];
+		for i = 1:length(children)
+			try
+				% Check connectivity state first
+				connState = h.XsDevice_connectivityState(children{i});
+				if connState == h.XsConnectivityState_XCS_Wireless
+					% Double-check it's an MTw device
+					childDeviceId = h.XsDevice_deviceId(children{i});
+					if h.XsDeviceId_isMtw(childDeviceId)
+						connectedDevices{end+1} = children{i};
+					end
+				end
+			catch
+				% Skip devices that cause errors
+				continue;
+			end
+		end
+		
+		if ~isempty(connectedDevices)
+			fprintf(' Found %d wirelessly connected MTw device(s)\n', length(connectedDevices));
+			break;
+		end
+		
+		pause(0.5);
+		fprintf('.');
+	end
+	
+	if isempty(connectedDevices)
+		fprintf('\n No MTw devices connected wirelessly within timeout period\n');
+		stopAll;
+		return;
+	end
+	
+	% Use the connected devices
+	children = connectedDevices;
+	
+	% Get device IDs for connected devices
+	devIdAll = cell(size(children));
+	for i = 1:length(children)
+		devIdAll{i} = dec2hex(h.XsDeviceId_toInt(h.XsDevice_deviceId(children{i})));
+	end
+	
 	% check connected sensors, see which are accepted and which are
 	% rejected.
-	[devicesUsed, devIdUsed, nDevs] = checkConnectedSensors(devIdAll);
+	[devicesUsed, devIdUsed, nDevs] = checkConnectedSensors(devIdAll, children, h);
 	fprintf(' Used device: %s \n',devIdUsed{:});
 else
 	assert(any(isMtw))
@@ -186,7 +261,7 @@ fprintf('\n Activate measurement mode \n');
 output = h.XsDevice_gotoMeasurement(device);
 
 % display radio connection information
-if(any(isDongle|isStation))
+if(any(isDongle|isStation|isWirelessMaster))
 	fprintf('\n Connection has been established on channel %i with an update rate of %i Hz\n', h.XsDevice_radioChannel(device), h.XsDevice_updateRate(device));
 else
 	assert(any(isMtw))
@@ -258,7 +333,7 @@ stopAll;
 					freeAcc = cell2mat(h.XsDataPacket_freeAcceleration(dataPacket));
 					status = h.XsDataPacket_status(dataPacket);
 					
-					% Log data using log_utils - THIS IS THE KEY CHANGE
+					% Log data using log_utils
 					log_utils('log', deviceId, packetCounter, eulerAngles, quat, acc, gyr, mag, freeAcc, status);
 					
 					% Display data (optional - you can comment this out if you don't want console output)
@@ -295,8 +370,13 @@ stopAll;
 		h.XsDevice_gotoConfig(device);
 		
 		% disable radio for station or dongle
-		if any(isStation|isDongle)
-			h.XsDevice_disableRadio(device);
+		if any(isStation|isDongle|isWirelessMaster)
+			fprintf('\n Disabling radio...\n');
+			try
+				h.XsDevice_disableRadio(device);
+			catch
+				fprintf(' Warning: Could not disable radio\n');
+			end
 		end
 		
 		% on close, devices go to config mode.
@@ -309,55 +389,61 @@ stopAll;
 		delete(h);
 	end
 
-	function [devicesUsed, devIdUsed, nDevs] = checkConnectedSensors(devIdAll)
+	function [devicesUsed, devIdUsed, nDevs] = checkConnectedSensors(devIdAll, children, h)
 		childUsed = false(size(children));
 		if isempty(children)
 			fprintf('\n No devices found \n')
 			stopAll
-			error('MTw:example:devicdes','No devices found')
+			error('MTw:example:devices','No devices found')
 		else
 			% check which sensors are connected
 			for ic=1:length(children)
-				if h.XsDevice_connectivityState(children{ic}) == h.XsConnectivityState_XCS_Wireless
+				connState = h.XsDevice_connectivityState(children{ic});
+				if connState == h.XsConnectivityState_XCS_Wireless
 					childUsed(ic) = true;
 				end
 			end
-			% show wich sensors are connected
+			
+			% show which sensors are connected
 			fprintf('\n Devices rejected:\n')
 			rejects = devIdAll(~childUsed);
-			I=0;
 			for i=1:length(rejects)
 				I = find(strcmp(devIdAll, rejects{i}));
-				fprintf(' %d - %s\n', I,rejects{i})
+				fprintf(' %d - %s\n', I, rejects{i})
 			end
 			fprintf('\n Devices accepted:\n')
 			accepted = devIdAll(childUsed);
 			for i=1:length(accepted)
 				I = find(strcmp(devIdAll, accepted{i}));
-				fprintf(' %d - %s\n', I,accepted{i})
+				fprintf(' %d - %s\n', I, accepted{i})
 			end
+			
 			str = input('\n Keep current status?(y/n) \n','s');
 			change = [];
 			if strcmp(str,'n')
 				str = input('\n Type the numbers of the sensors (csv list, e.g. "1,2,3") from which status should be changed \n (if accepted than reject or the other way around):\n','s');
 				change = str2double(regexp(str, ',', 'split'));
 				for iR=1:length(change)
-					if childUsed(change(iR))
-						% reject sensors
-						h.XsDevice_rejectConnection(children{change(iR)});
-						childUsed(change(iR)) = false;
-					else
-						% accept sensors
-						h.XsDevice_acceptConnection(children{change(iR)});
-						childUsed(change(iR)) = true;
+					if ~isnan(change(iR)) && change(iR) <= length(children)
+						if childUsed(change(iR))
+							% reject sensors
+							h.XsDevice_rejectConnection(children{change(iR)});
+							childUsed(change(iR)) = false;
+						else
+							% accept sensors
+							h.XsDevice_acceptConnection(children{change(iR)});
+							childUsed(change(iR)) = true;
+						end
 					end
 				end
 			end
+			
 			% if no device is connected, give error
 			if sum(childUsed) == 0
 				stopAll
-				error('MTw:example:devicdes','No devices connected')
+				error('MTw:example:devices','No devices connected')
 			end
+			
 			% if sensors are rejected or accepted check blinking leds again
 			if ~isempty(change)
 				input('\n When sensors are connected (synced leds), press enter... \n');
