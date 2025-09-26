@@ -241,6 +241,13 @@ if(any(isDongle|isStation|isWirelessMaster))
 	% rejected.
 	[devicesUsed, devIdUsed, nDevs] = checkConnectedSensors(devIdAll, children, h);
 	fprintf(' Used device: %s \n',devIdUsed{:});
+	
+	% Get the heading reset flag from the function
+	if exist('doHeadingReset', 'var')
+		% doHeadingReset is already set from checkConnectedSensors
+	else
+		doHeadingReset = false;
+	end
 else
 	assert(any(isMtw))
 	nDevs = 1; % only one device available
@@ -253,6 +260,13 @@ end
 t = cell(nDevs, 1);
 for i = 1:nDevs
     t{i} = [];
+end
+
+% Initialize logging control flag
+if exist('doHeadingReset', 'var') && doHeadingReset
+    enableLogging = false; % Don't log until after heading reset
+else
+    enableLogging = true; % Log immediately if no reset needed
 end
 
 %% Entering measurement mode
@@ -289,6 +303,60 @@ if output
 	h.registerevent({'onLiveDataAvailable',@handleData});
 	h.setCallbackOption(h.XsComCallbackOptions_XSC_LivePacket, h.XsComCallbackOptions_XSC_None);
 	fprintf('\n Live data streaming started...\n');
+	
+	% Perform heading reset if requested - AFTER data streaming starts
+	if exist('doHeadingReset', 'var') && doHeadingReset
+		fprintf('\n Waiting for data flow to stabilize before heading reset...\n');
+		fprintf(' Make sure all sensors have aligned physically with the same heading!\n');
+		
+		% Wait for data to be flowing (similar to Python's ready_to_record check)
+		maxWaitTime = 10; % seconds
+		waitStart = tic;
+		dataFlowing = false;
+		
+		while toc(waitStart) < maxWaitTime && ~dataFlowing
+			% Check if we have received data from all devices
+			allDevicesReady = true;
+			for i = 1:length(devicesUsed)
+				if isempty(t{i})
+					allDevicesReady = false;
+					break;
+				end
+			end
+			
+			if allDevicesReady
+				dataFlowing = true;
+				break;
+			end
+			
+			pause(0.1);
+			fprintf('.');
+		end
+		
+		if dataFlowing
+			fprintf('\n Performing heading reset on all MTw devices...\n');
+			pause(0.5); % Small delay to ensure stable data flow
+			
+			for i = 1:length(devicesUsed)
+				try
+					h.XsDevice_resetOrientation(devicesUsed{i}, h.XsResetMethod_XRM_Heading);
+					fprintf(' Heading reset completed for device %s\n', devIdUsed{i});
+				catch ME
+					fprintf(' Warning: Failed to reset heading for device %s: %s\n', devIdUsed{i}, ME.message);
+				end
+			end
+			fprintf(' Heading reset completed for all devices.\n');
+			fprintf(' Now enabling data logging...\n\n');
+			
+			% Enable logging after heading reset is complete
+			enableLogging = true;
+		else
+			fprintf('\n Warning: Could not confirm data flow, skipping heading reset\n');
+			% Enable logging anyway since reset failed
+			enableLogging = true;
+		end
+	end
+	
 	input('\n Press enter to stop measurement. \n');
 	
 else
@@ -333,19 +401,23 @@ stopAll;
 					freeAcc = cell2mat(h.XsDataPacket_freeAcceleration(dataPacket));
 					status = h.XsDataPacket_status(dataPacket);
 					
-					% Log data using log_utils
-					log_utils('log', deviceId, packetCounter, eulerAngles, quat, acc, gyr, mag, freeAcc, status);
+					% Log data using log_utils only if logging is enabled
+					if enableLogging
+						log_utils('log', deviceId, packetCounter, eulerAngles, quat, acc, gyr, mag, freeAcc, status);
+					end
 					
 					% Display data (optional - you can comment this out if you don't want console output)
-					fprintf('Device %s: ', deviceId);
-					fprintf('packetCounter=%u; ', packetCounter);              
-					fprintf('Roll=%.2f, Pitch=%.2f, Yaw=%.2f; ', eulerAngles(1), eulerAngles(2), eulerAngles(3));
-					fprintf('QuatW=%.2f, QuatX=%.2f, QuatY=%.2f, QuatZ=%.2f; ', quat(1), quat(2), quat(3), quat(4));
-					fprintf('AccX=%.2f, AccY=%.2f, AccZ=%.2f; ', acc(1), acc(2), acc(3));
-					fprintf('GyrX=%.4f, GyrY=%.4f, GyrZ=%.4f; ', gyr(1), gyr(2), gyr(3));
-					fprintf('MagX=%.2f, MagY=%.2f, MagZ=%.2f; ', mag(1), mag(2), mag(3));
-					fprintf('FreeAccX=%.2f, FreeAccY=%.2f, FreeAccZ=%.2f; ', freeAcc(1), freeAcc(2), freeAcc(3));
-					fprintf('status=%u;\n', status);    
+					if enableLogging  % Only display data when we're actually logging it
+						fprintf('Device %s: ', deviceId);
+						fprintf('packetCounter=%u; ', packetCounter);              
+						fprintf('Roll=%.2f, Pitch=%.2f, Yaw=%.2f; ', eulerAngles(1), eulerAngles(2), eulerAngles(3));
+						fprintf('QuatW=%.2f, QuatX=%.2f, QuatY=%.2f, QuatZ=%.2f; ', quat(1), quat(2), quat(3), quat(4));
+						fprintf('AccX=%.2f, AccY=%.2f, AccZ=%.2f; ', acc(1), acc(2), acc(3));
+						fprintf('GyrX=%.4f, GyrY=%.4f, GyrZ=%.4f; ', gyr(1), gyr(2), gyr(3));
+						fprintf('MagX=%.2f, MagY=%.2f, MagZ=%.2f; ', mag(1), mag(2), mag(3));
+						fprintf('FreeAccX=%.2f, FreeAccY=%.2f, FreeAccZ=%.2f; ', freeAcc(1), freeAcc(2), freeAcc(3));
+						fprintf('status=%u;\n', status);
+					end    
 				end
 				
 				h.dataPacketHandled(deviceFound, dataPacket);
@@ -418,6 +490,10 @@ stopAll;
 				fprintf(' %d - %s\n', I, accepted{i})
 			end
 			
+			% Ask for heading reset before asking about device status
+			headingResetStr = input('\n Do you want to do heading reset? (y/n) \n','s');
+			doHeadingReset = strcmpi(headingResetStr, 'y');
+			
 			str = input('\n Keep current status?(y/n) \n','s');
 			change = [];
 			if strcmp(str,'n')
@@ -452,5 +528,12 @@ stopAll;
 		devicesUsed = children(childUsed);
 		devIdUsed = devIdAll(childUsed);
 		nDevs = sum(childUsed);
+		
+		% Return the heading reset flag as well
+		if exist('doHeadingReset', 'var')
+			assignin('caller', 'doHeadingReset', doHeadingReset);
+		else
+			assignin('caller', 'doHeadingReset', false);
+		end
 	end
 end
