@@ -26,6 +26,20 @@ import os #for ubuntu only
 import time
 from collections import deque
 from threading import Lock
+import signal
+import atexit
+import logging
+import copy
+
+# Set up logging
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('xsens_debug.log'),
+        logging.StreamHandler()
+    ]
+)
 
 #---------Ubuntu may need to set up the pacakge location for XDA and keyboard-----#
 #module_path = "/home/<yourusername>/.local/lib/python3.8/site-packages/"
@@ -37,6 +51,34 @@ import keyboard
 
 #remove the added path after importing(optional)
 #sys.path.pop(0)
+
+
+def get_high_accuracy_timestamp_datetime():
+    """
+    Get the most accurate timestamp as a datetime object.
+    Converts from time.time_ns() to preserve maximum precision.
+    
+    Returns:
+        datetime: Timezone-aware datetime with microsecond precision
+    """
+    from datetime import datetime, timezone, timedelta
+    
+    nanoseconds = time.time_ns()
+    microseconds = nanoseconds // 1000
+    
+    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    return epoch + timedelta(microseconds=microseconds)
+
+
+def get_high_accuracy_timestamp():
+    """
+    Get the most accurate timestamp as a float (seconds since epoch).
+    Uses time.time_ns() for nanosecond precision.
+    
+    Returns:
+        float: Timestamp in seconds with nanosecond precision
+    """
+    return time.time_ns() / 1_000_000_000.0
 
 
 
@@ -69,28 +111,31 @@ class WirelessMasterCallback(xda.XsCallback):
             return self.m_connectedMTWs.copy()
 
     def onConnectivityChanged(self, dev, newState):
-        with self.m_mutex:
-            if newState == xda.XCS_Disconnected:
-                print(f"\nEVENT: MTW Disconnected -> {dev.deviceId()}")
-                self.m_connectedMTWs.discard(dev)
-            elif newState == xda.XCS_Rejected:
-                print(f"\nEVENT: MTW Rejected -> {dev.deviceId()}")
-                self.m_connectedMTWs.discard(dev)
-            elif newState == xda.XCS_PluggedIn:
-                print(f"\nEVENT: MTW PluggedIn -> {dev.deviceId()}")
-                self.m_connectedMTWs.discard(dev)
-            elif newState == xda.XCS_Wireless:
-                print(f"\nEVENT: MTW Connected -> {dev.deviceId()}")
-                self.m_connectedMTWs.add(dev)
-            elif newState == xda.XCS_File:
-                print(f"\nEVENT: MTW File -> {dev.deviceId()}")
-                self.m_connectedMTWs.discard(dev)
-            elif newState == xda.XCS_Unknown:
-                print(f"\nEVENT: MTW Unknown -> {dev.deviceId()}")
-                self.m_connectedMTWs.discard(dev)
-            else:
-                print(f"\nEVENT: MTW Error -> {dev.deviceId()}")
-                self.m_connectedMTWs.discard(dev)
+        try:
+            with self.m_mutex:
+                if newState == xda.XCS_Disconnected:
+                    logging.info(f"EVENT: MTW Disconnected -> {dev.deviceId()}")
+                    self.m_connectedMTWs.discard(dev)
+                elif newState == xda.XCS_Rejected:
+                    logging.info(f"EVENT: MTW Rejected -> {dev.deviceId()}")
+                    self.m_connectedMTWs.discard(dev)
+                elif newState == xda.XCS_PluggedIn:
+                    logging.info(f"EVENT: MTW PluggedIn -> {dev.deviceId()}")
+                    self.m_connectedMTWs.discard(dev)
+                elif newState == xda.XCS_Wireless:
+                    logging.info(f"EVENT: MTW Connected -> {dev.deviceId()}")
+                    self.m_connectedMTWs.add(dev)
+                elif newState == xda.XCS_File:
+                    logging.info(f"EVENT: MTW File -> {dev.deviceId()}")
+                    self.m_connectedMTWs.discard(dev)
+                elif newState == xda.XCS_Unknown:
+                    logging.info(f"EVENT: MTW Unknown -> {dev.deviceId()}")
+                    self.m_connectedMTWs.discard(dev)
+                else:
+                    logging.info(f"EVENT: MTW Error -> {dev.deviceId()}")
+                    self.m_connectedMTWs.discard(dev)
+        except Exception as e:
+            logging.error(f"Error in onConnectivityChanged: {e}", exc_info=True)
 
 class MtwCallback(xda.XsCallback):
     def __init__(self, mtwIndex, device):
@@ -99,19 +144,34 @@ class MtwCallback(xda.XsCallback):
         self.m_mutex = Lock()
         self.m_mtwIndex = mtwIndex
         self.m_device = device
+        self.packet_count = 0
 
     def dataAvailable(self):
-        with self.m_mutex:
-            return bool(self.m_packetBuffer)
+        try:
+            with self.m_mutex:
+                return bool(self.m_packetBuffer)
+        except Exception as e:
+            logging.error(f"Error in dataAvailable: {e}", exc_info=True)
+            return False
 
     def getOldestPacket(self):
-        with self.m_mutex:
-            packet = self.m_packetBuffer[0]
-            return packet
+        try:
+            with self.m_mutex:
+                if len(self.m_packetBuffer) > 0:
+                    packet = self.m_packetBuffer[0]
+                    return packet
+                return None
+        except Exception as e:
+            logging.error(f"Error in getOldestPacket: {e}", exc_info=True)
+            return None
 
     def deleteOldestPacket(self):
-        with self.m_mutex:
-            self.m_packetBuffer.popleft()
+        try:
+            with self.m_mutex:
+                if len(self.m_packetBuffer) > 0:
+                    self.m_packetBuffer.popleft()
+        except Exception as e:
+            logging.error(f"Error in deleteOldestPacket: {e}", exc_info=True)
 
     def getMtwIndex(self):
         return self.m_mtwIndex
@@ -121,12 +181,213 @@ class MtwCallback(xda.XsCallback):
         return self.m_device
 
     def onLiveDataAvailable(self, _, packet):
-        with self.m_mutex:
-            # NOTE: Processing of packets should not be done in this thread.
-            self.m_packetBuffer.append(packet)
-            if len(self.m_packetBuffer) > 300:
-                self.deleteOldestPacket()
+        try:
+            with self.m_mutex:
+                # NOTE: Processing of packets should not be done in this thread.
+                self.m_packetBuffer.append(packet)
+                self.packet_count += 1
+                if len(self.m_packetBuffer) > 300:
+                    self.deleteOldestPacket()
+        except Exception as e:
+            logging.error(f"Error in onLiveDataAvailable: {e}", exc_info=True)
 
+
+def collect_sensor_data(mtw_callbacks):
+    """
+    Main data collection loop - runs until CTRL+C
+    
+    Args:
+        mtw_callbacks: List of MtwCallback objects
+    """
+    logging.info("\nMain loop. Press CTRL+C to quit\n")
+    logging.info("Waiting for data available...")
+
+    # Store as simple Python values to avoid object reference issues
+    # This approach is safer than holding C++ object references
+    sensor_data = []
+    for i in range(len(mtw_callbacks)):
+        sensor_data.append({
+            'device_id': str(mtw_callbacks[i].device().deviceId()),
+            'timestamp': 0.0,
+            'packet_counter': 0,
+            'roll': 0.0,
+            'pitch': 0.0,
+            'yaw': 0.0,
+            'gyr_x': 0.0,
+            'gyr_y': 0.0,
+            'gyr_z': 0.0,
+            'acc_x': 0.0,
+            'acc_y': 0.0,
+            'acc_z': 0.0,
+            'mag_x': 0.0,
+            'mag_y': 0.0,
+            'mag_z': 0.0,
+            'status': 0
+        })
+    
+    print_counter = 0
+    loop_counter = 0
+    
+    # Main loop - runs until CTRL+C
+    while True:
+        try:
+            loop_counter += 1
+            if loop_counter % 1000 == 0:
+                logging.debug(f"Loop iteration: {loop_counter}")
+            
+            time.sleep(0.001)  # Small sleep to prevent 100% CPU usage
+
+            new_data_available = False
+            
+            for i in range(len(mtw_callbacks)):
+                try:
+                    if mtw_callbacks[i].dataAvailable():
+                        new_data_available = True
+                        packet = mtw_callbacks[i].getOldestPacket()
+                        if packet is not None:
+                            try:
+                                # Capture timestamp immediately when packet is received
+                                timestamp = get_high_accuracy_timestamp()
+                                
+                                # CRITICAL: Extract data immediately like in the reference code
+                                # Get the euler object temporarily
+                                euler = packet.orientationEuler()
+                                
+                                # Immediately extract values as Python primitives
+                                # This prevents holding references to C++ objects
+                                packet_counter = packet.packetCounter()
+                                roll = euler.x()
+                                pitch = euler.y()
+                                yaw = euler.z()
+                                
+                                # Store timestamp and euler angles as Python types
+                                sensor_data[i]['timestamp'] = float(timestamp)
+                                sensor_data[i]['packet_counter'] = int(packet_counter)
+                                sensor_data[i]['roll'] = float(roll)
+                                sensor_data[i]['pitch'] = float(pitch)
+                                sensor_data[i]['yaw'] = float(yaw)
+                                
+                                # Extract gyroscope data (calibrated)
+                                if packet.containsCalibratedGyroscopeData():
+                                    gyr = packet.calibratedGyroscopeData()
+                                    sensor_data[i]['gyr_x'] = float(gyr[0])
+                                    sensor_data[i]['gyr_y'] = float(gyr[1])
+                                    sensor_data[i]['gyr_z'] = float(gyr[2])
+                                
+                                # Extract accelerometer data (calibrated)
+                                if packet.containsCalibratedAcceleration():
+                                    acc = packet.calibratedAcceleration()
+                                    sensor_data[i]['acc_x'] = float(acc[0])
+                                    sensor_data[i]['acc_y'] = float(acc[1])
+                                    sensor_data[i]['acc_z'] = float(acc[2])
+                                
+                                # Extract magnetometer data (calibrated)
+                                if packet.containsCalibratedMagneticField():
+                                    mag = packet.calibratedMagneticField()
+                                    sensor_data[i]['mag_x'] = float(mag[0])
+                                    sensor_data[i]['mag_y'] = float(mag[1])
+                                    sensor_data[i]['mag_z'] = float(mag[2])
+                                
+                                # Extract status word
+                                if packet.containsStatus():
+                                    status = packet.status()
+                                    sensor_data[i]['status'] = int(status)
+                                
+                            except Exception as e:
+                                logging.error(f"Error extracting data from packet {i}: {e}", exc_info=True)
+                            
+                            # Delete packet immediately after processing
+                            mtw_callbacks[i].deleteOldestPacket()
+                        else:
+                            logging.warning(f"Received None packet from callback {i}")
+                except Exception as e:
+                    logging.error(f"Error processing callback {i}: {e}", exc_info=True)
+
+            if new_data_available:
+                # print only 1/x of the data in the screen.
+                if print_counter % 1 == 0:
+                    try:
+                        for i in range(len(mtw_callbacks)):
+                            data = sensor_data[i]
+                            print(f"[{i}]: ID: {data['device_id']}, "
+                                f"Time: {data['timestamp']:.5f}, "
+                                f"Pkt: {data['packet_counter']:5d}, "
+                                f"Status: 0x{data['status']:08X}, "
+                                f"Gyr: [{data['gyr_x']:7.2f}, {data['gyr_y']:7.2f}, {data['gyr_z']:7.2f}], "
+                                f"Acc: [{data['acc_x']:7.2f}, {data['acc_y']:7.2f}, {data['acc_z']:7.2f}], "
+                                f"Mag: [{data['mag_x']:7.2f}, {data['mag_y']:7.2f}, {data['mag_z']:7.2f}], "
+                                f"Euler: [{data['roll']:7.2f}, {data['pitch']:7.2f}, {data['yaw']:7.2f}]")
+                    except Exception as e:
+                        logging.error(f"Error printing data: {e}", exc_info=True)
+            
+                print_counter += 1
+                
+        except KeyboardInterrupt:
+            logging.info("Keyboard interrupt detected in main loop. Exiting...")
+            break
+        except Exception as e:
+            logging.error(f"Error in main loop: {e}", exc_info=True)
+            time.sleep(0.1)  # Pause briefly before continuing
+
+
+# Global variable for cleanup
+control_global = None
+wireless_master_device_global = None
+cleanup_done = False
+
+def cleanup():
+    """Cleanup function to be called on exit"""
+    global cleanup_done
+    
+    if cleanup_done:
+        logging.info("Cleanup already performed, skipping...")
+        return
+    
+    cleanup_done = True
+    logging.info("Cleanup function called")
+    
+    try:
+        if wireless_master_device_global is not None:
+            logging.info("Setting config mode in cleanup...")
+            try:
+                wireless_master_device_global.gotoConfig()
+            except Exception as e:
+                logging.debug(f"Error in gotoConfig: {e}")
+            
+            logging.info("Disabling radio in cleanup...")
+            try:
+                wireless_master_device_global.disableRadio()
+            except Exception as e:
+                logging.debug(f"Error in disableRadio: {e}")
+        
+        if control_global is not None:
+            logging.info("Closing XsControl in cleanup...")
+            try:
+                control_global.close()
+            except Exception as e:
+                logging.debug(f"Error in close: {e}")
+    except Exception as e:
+        logging.error(f"Error during cleanup: {e}", exc_info=True)
+
+def signal_handler(sig, frame):
+    """Handle CTRL+C"""
+    global cleanup_done
+    
+    logging.info(f"Signal {sig} received")
+    print("\n\nInterrupt received, cleaning up...")
+    
+    cleanup()
+    
+    logging.info("Cleanup complete. Exiting.")
+    print("Cleanup complete. Exiting.")
+    
+    # Exit immediately without calling atexit handlers again
+    os._exit(0)
+
+# Register cleanup and signal handlers
+atexit.register(cleanup)
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
 
 
 if __name__ == '__main__':
@@ -136,73 +397,69 @@ if __name__ == '__main__':
     wireless_master_callback = WirelessMasterCallback()
     mtw_callbacks = []
 
-    print("Constructing XsControl...")
+    logging.info("Constructing XsControl...")
     control = xda.XsControl.construct()
+    control_global = control
+    
     if control is None:
-        print("Failed to construct XsControl instance.")
+        logging.error("Failed to construct XsControl instance.")
         sys.exit(1)
 
     try:
-        print("Scanning ports...")
+        logging.info("Scanning ports...")
 
         detected_devices = xda.XsScanner_scanPorts()
 
-        print("Finding wireless master...")
+        logging.info("Finding wireless master...")
         wireless_master_port = next((port for port in detected_devices if port.deviceId().isWirelessMaster()), None)
         if wireless_master_port is None:
             raise RuntimeError("No wireless masters found")
 
-        print(f"Wireless master found @ {wireless_master_port}")
+        logging.info(f"Wireless master found @ {wireless_master_port}")
 
-        print("Opening port...")
+        logging.info("Opening port...")
         if not control.openPort(wireless_master_port.portName(), wireless_master_port.baudrate()):
             raise RuntimeError(f"Failed to open port {wireless_master_port}")
 
-        print("Getting XsDevice instance for wireless master...")
+        logging.info("Getting XsDevice instance for wireless master...")
         wireless_master_device = control.device(wireless_master_port.deviceId())
+        wireless_master_device_global = wireless_master_device
+        
         if wireless_master_device is None:
             raise RuntimeError(f"Failed to construct XsDevice instance: {wireless_master_port}")
 
-        print(f"XsDevice instance created @ {wireless_master_device}")
+        logging.info(f"XsDevice instance created @ {wireless_master_device}")
 
-        print("Setting config mode...")
+        logging.info("Setting config mode...")
         if not wireless_master_device.gotoConfig():
             raise RuntimeError(f"Failed to goto config mode: {wireless_master_device}")
 
-        print("Attaching callback handler...")
+        logging.info("Attaching callback handler...")
         wireless_master_device.addCallbackHandler(wireless_master_callback)
 
-        print("Getting the list of the supported update rates...")
+        logging.info("Getting the list of the supported update rates...")
         supportUpdateRates = xda.XsDevice.supportedUpdateRates(wireless_master_device, xda.XDI_None)
 
-        print("Supported update rates: ", end="")
-        for rate in supportUpdateRates:
-            print(rate, end=" ")
-        print()
+        logging.info(f"Supported update rates: {supportUpdateRates}")
 
         new_update_rate = find_closest_update_rate(supportUpdateRates, desired_update_rate)
 
-        print(f"Setting update rate to {new_update_rate} Hz...")
+        logging.info(f"Setting update rate to {new_update_rate} Hz...")
 
         if not wireless_master_device.setUpdateRate(new_update_rate):
             raise RuntimeError(f"Failed to set update rate: {wireless_master_device}")
 
-        print("Disabling radio channel if previously enabled...")
+        logging.info("Disabling radio channel if previously enabled...")
 
         if wireless_master_device.isRadioEnabled():
             if not wireless_master_device.disableRadio():
                 raise RuntimeError(f"Failed to disable radio channel: {wireless_master_device}")
 
-        print(f"Setting radio channel to {desired_radio_channel} and enabling radio...")
+        logging.info(f"Setting radio channel to {desired_radio_channel} and enabling radio...")
         if not wireless_master_device.enableRadio(desired_radio_channel):
             raise RuntimeError(f"Failed to set radio channel: {wireless_master_device}")
 
-        print("Waiting for MTW to wirelessly connect...\n")
-
-
-        # This function checks for user input to break the loop
-        def user_input_ready():
-            return False  # Replace this with your method to detect user input
+        logging.info("Waiting for MTW to wirelessly connect...\n")
 
 
         wait_for_connections = True
@@ -211,18 +468,18 @@ if __name__ == '__main__':
             time.sleep(0.1)
             next_count = len(wireless_master_callback.getWirelessMTWs())
             if next_count != connected_mtw_count:
-                print(f"Number of connected MTWs: {next_count}. Press 'Y' to start measurement.")
+                logging.info(f"Number of connected MTWs: {next_count}. Press 'Y' to start measurement.")
                 connected_mtw_count = next_count
 
             wait_for_connections = not keyboard.is_pressed('y')
 
 
 
-        print("Starting measurement...")
+        logging.info("Starting measurement...")
         if not wireless_master_device.gotoMeasurement():
             raise RuntimeError(f"Failed to goto measurement mode: {wireless_master_device}")
 
-        print("Getting XsDevice instances for all MTWs...")
+        logging.info("Getting XsDevice instances for all MTWs...")
         all_device_ids = control.deviceIds()
         mtw_device_ids = [device_id for device_id in all_device_ids if device_id.isMtw()]
         mtw_devices = []
@@ -233,82 +490,66 @@ if __name__ == '__main__':
             else:
                 raise RuntimeError("Failed to create an MTW XsDevice instance")
 
-        print("Attaching callback handlers to MTWs...")
+        logging.info("Attaching callback handlers to MTWs...")
         mtw_callbacks = [MtwCallback(i, mtw_devices[i]) for i in range(len(mtw_devices))]
         for i in range(len(mtw_devices)):
             mtw_devices[i].addCallbackHandler(mtw_callbacks[i])
 
-        print("Creating a log file...")
+        logging.info("Creating a log file...")
         logFileName = "logfile.mtb"
         if wireless_master_device.createLogFile(logFileName) != xda.XRV_OK:
             raise RuntimeError("Failed to create a log file. Aborting.")
         else:
-            print("Created a log file: %s" % logFileName)
+            logging.info("Created a log file: %s" % logFileName)
 
-        print("Starting recording...")
+        logging.info("Starting recording...")
         ready_to_record = False
 
         while not ready_to_record:
             ready_to_record = all([mtw_callbacks[i].dataAvailable() for i in range(len(mtw_callbacks))])
             if not ready_to_record:
-                print("Waiting for data available...")
+                logging.info("Waiting for data available...")
                 time.sleep(0.5)
-            #     optional, enable heading reset before recording data, make sure all sensors have aligned physically the same heading!!
-            # else:
-            #     print("Do heading reset before recording data, make sure all sensors have aligned physically the same heading!!")
-            #     all([mtw_devices[i].resetOrientation(xda.XRM_Heading) for i in range(len(mtw_callbacks))])
 
         if not wireless_master_device.startRecording():
             raise RuntimeError("Failed to start recording. Aborting.")
 
-        print("\nMain loop. Press any key to quit\n")
-        print("Waiting for data available...")
+        # Start the main data collection loop
+        collect_sensor_data(mtw_callbacks)
 
-        euler_data = [xda.XsEuler()] * len(mtw_callbacks)
-        print_counter = 0
-        while not user_input_ready():
-            time.sleep(0)
+        logging.info("Exited main loop")
+        logging.info("Setting config mode...")
+        try:
+            if not wireless_master_device.gotoConfig():
+                logging.error("Failed to goto config mode")
+        except Exception as e:
+            logging.error(f"Error in gotoConfig: {e}")
 
-            new_data_available = False
-            for i in range(len(mtw_callbacks)):
-                if mtw_callbacks[i].dataAvailable():
-                    new_data_available = True
-                    packet = mtw_callbacks[i].getOldestPacket()
-                    euler_data[i] = packet.orientationEuler()
-                    mtw_callbacks[i].deleteOldestPacket()
+        logging.info("Disabling radio...")
+        try:
+            if not wireless_master_device.disableRadio():
+                logging.error("Failed to disable radio")
+        except Exception as e:
+            logging.error(f"Error in disableRadio: {e}")
 
-            if new_data_available:
-                # print only 1/x of the data in the screen.
-                if print_counter % 1 == 0:
-                    for i in range(len(mtw_callbacks)):
-                        print(f"[{i}]: ID: {mtw_callbacks[i].device().deviceId()}, "
-                              f"Roll: {euler_data[i].x():7.2f}, "
-                              f"Pitch: {euler_data[i].y():7.2f}, "
-                              f"Yaw: {euler_data[i].z():7.2f}")
-
-                print_counter += 1
-
-        print("Setting config mode...")
-        if not wireless_master_device.gotoConfig():
-            raise RuntimeError(f"Failed to goto config mode: {wireless_master_device}")
-
-        print("Disabling radio...")
-        if not wireless_master_device.disableRadio():
-            raise RuntimeError(f"Failed to disable radio: {wireless_master_device}")
-
+    except KeyboardInterrupt:
+        logging.info("Keyboard interrupt detected in main try block.")
+        print("\n****ABORT****")
     except Exception as ex:
-        print(ex)
+        logging.error(f"Exception: {ex}", exc_info=True)
         print("****ABORT****")
-    except:
-        print("An unknown fatal error has occurred. Aborting.")
-        print("****ABORT****")
+    finally:
+        # Perform cleanup if not already done
+        if not cleanup_done:
+            logging.info("Performing final cleanup...")
+            
+            logging.info("Closing XsControl...")
+            try:
+                control.close()
+            except Exception as e:
+                logging.error(f"Error closing control: {e}")
 
-    print("Closing XsControl...")
-    control.close()
-
-    print("Deleting mtw callbacks...")
-
-    print("Successful exit.")
-    print("Press [ENTER] to continue.")
-    input()
-
+    if not cleanup_done:
+        logging.info("Successful exit.")
+        print("Press [ENTER] to continue.")
+        input()
