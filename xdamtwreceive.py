@@ -163,6 +163,62 @@ class TimestampManager:
         self.last_packet_counter = None
 
 
+class DuplicatePacketFilter:
+    """
+    Detects and filters duplicate packets based on sensor ID and packet counter.
+    """
+    
+    def __init__(self, num_sensors):
+        """
+        Initialize duplicate packet filter.
+        
+        Args:
+            num_sensors: Number of sensors to track
+        """
+        # Dictionary to store last packet counter for each sensor
+        # Key: sensor_index, Value: last_packet_counter
+        self.last_packet_counters = {}
+        self.duplicate_count = 0
+        
+    def is_duplicate(self, sensor_index, packet_counter):
+        """
+        Check if this packet is a duplicate.
+        
+        Args:
+            sensor_index: Index of the sensor (0, 1, 2, ...)
+            packet_counter: Current packet counter
+            
+        Returns:
+            bool: True if duplicate, False if new packet
+        """
+        # Check if we have seen this sensor before
+        if sensor_index not in self.last_packet_counters:
+            # First packet from this sensor
+            self.last_packet_counters[sensor_index] = packet_counter
+            return False
+        
+        # Check if packet counter is the same as last time
+        if self.last_packet_counters[sensor_index] == packet_counter:
+            # Duplicate packet detected
+            self.duplicate_count += 1
+            logging.debug(f"Duplicate packet detected for sensor {sensor_index}, "
+                         f"packet counter: {packet_counter}")
+            return True
+        else:
+            # New packet - update the last counter
+            self.last_packet_counters[sensor_index] = packet_counter
+            return False
+    
+    def get_duplicate_count(self):
+        """Get total number of duplicates detected."""
+        return self.duplicate_count
+    
+    def reset(self):
+        """Reset the duplicate filter."""
+        self.last_packet_counters = {}
+        self.duplicate_count = 0
+
+
 def generate_log_filename(station_id):
     """
     Generate log filename based on Awinda station ID and current timestamp.
@@ -395,6 +451,9 @@ def collect_sensor_data(mtw_callbacks, data_rate, csv_writer):
 
     # Create timestamp managers for each sensor
     timestamp_managers = [TimestampManager(data_rate) for _ in range(len(mtw_callbacks))]
+    
+    # Create duplicate packet filter
+    duplicate_filter = DuplicatePacketFilter(len(mtw_callbacks))
 
     # Store as simple Python values to avoid object reference issues
     # This approach is safer than holding C++ object references
@@ -440,6 +499,7 @@ def collect_sensor_data(mtw_callbacks, data_rate, csv_writer):
             time.sleep(0.001)  # Small sleep to prevent 100% CPU usage
 
             new_data_available = False
+            sensors_updated = [False] * len(mtw_callbacks)  # Track which sensors got new data
             
             for i in range(len(mtw_callbacks)):
                 try:
@@ -448,19 +508,26 @@ def collect_sensor_data(mtw_callbacks, data_rate, csv_writer):
                         packet = mtw_callbacks[i].getOldestPacket()
                         if packet is not None:
                             try:
-                                # Capture PC timestamp when packet is received
-                                pc_timestamp = get_high_accuracy_timestamp()
-                                
-                                # CRITICAL: Extract data immediately like in the reference code
-                                # Get the euler object temporarily
-                                euler = packet.orientationEuler()
-                                
-                                # Immediately extract values as Python primitives
-                                # This prevents holding references to C++ objects
+                                # Extract packet counter first to check for duplicates
                                 packet_counter = packet.packetCounter()
-                                roll = euler.x()
-                                pitch = euler.y()
-                                yaw = euler.z()
+                                
+                                # Check if this is a duplicate packet
+                                is_duplicate = duplicate_filter.is_duplicate(i, packet_counter)
+                                
+                                if not is_duplicate:
+                                    # Only process if not duplicate
+                                    # Capture PC timestamp when packet is received
+                                    pc_timestamp = get_high_accuracy_timestamp()
+                                    
+                                    # CRITICAL: Extract data immediately like in the reference code
+                                    # Get the euler object temporarily
+                                    euler = packet.orientationEuler()
+                                    
+                                    # Immediately extract values as Python primitives
+                                    # This prevents holding references to C++ objects
+                                    roll = euler.x()
+                                    pitch = euler.y()
+                                    yaw = euler.z()
                                 
                                 # Extract quaternion data
                                 q = packet.orientationQuaternion()
@@ -523,9 +590,12 @@ def collect_sensor_data(mtw_callbacks, data_rate, csv_writer):
                                     status = packet.status()
                                     sensor_data[i]['status'] = int(status)
                                 
-                                # Write data to CSV file
+                                # Write data to CSV file (only for non-duplicate packets)
                                 write_sensor_data_to_csv(csv_writer, sensor_data[i])
                                 
+                                # Mark this sensor as updated
+                                sensors_updated[i] = True
+                            
                             except Exception as e:
                                 logging.error(f"Error extracting data from packet {i}: {e}", exc_info=True)
                             
@@ -541,18 +611,20 @@ def collect_sensor_data(mtw_callbacks, data_rate, csv_writer):
                 if print_counter % 1 == 0:
                     try:
                         for i in range(len(mtw_callbacks)):
-                            data = sensor_data[i]
-                            print(f"[{i}]: ID: {data['device_id']}, "
-                                f"Time: {data['timestamp']:.5f}, "
-                                f"Pkt: {data['packet_counter']:5d}, "
-                                f"Status: 0x{data['status']:08X}, "
-                                f"Gyr: [{data['gyr_x']:7.2f}, {data['gyr_y']:7.2f}, {data['gyr_z']:7.2f}], "
-                                f"Acc: [{data['acc_x']:7.2f}, {data['acc_y']:7.2f}, {data['acc_z']:7.2f}], "
-                                f"Mag: [{data['mag_x']:7.2f}, {data['mag_y']:7.2f}, {data['mag_z']:7.2f}], "
-                                f"Euler: [{data['roll']:7.2f}, {data['pitch']:7.2f}, {data['yaw']:7.2f}], "
-                                f"Quat: [{data['q0']:7.4f}, {data['q1']:7.4f}, {data['q2']:7.4f}, {data['q3']:7.4f}], "
-                                f"FreeAcc: [{data['free_acc_x']:7.2f}, {data['free_acc_y']:7.2f}, {data['free_acc_z']:7.2f}], "
-                                f"Pressure: {data['pressure']:6d}")
+                            # Only print if this sensor had new (non-duplicate) data this iteration
+                            if sensors_updated[i]:
+                                data = sensor_data[i]
+                                print(f"[{i}]: ID: {data['device_id']}, "
+                                    f"Time: {data['timestamp']:.5f}, "
+                                    f"Pkt: {data['packet_counter']:5d}, "
+                                    f"Status: 0x{data['status']:08X}, "
+                                    f"Gyr: [{data['gyr_x']:7.2f}, {data['gyr_y']:7.2f}, {data['gyr_z']:7.2f}], "
+                                    f"Acc: [{data['acc_x']:7.2f}, {data['acc_y']:7.2f}, {data['acc_z']:7.2f}], "
+                                    f"Mag: [{data['mag_x']:7.2f}, {data['mag_y']:7.2f}, {data['mag_z']:7.2f}], "
+                                    f"Euler: [{data['roll']:7.2f}, {data['pitch']:7.2f}, {data['yaw']:7.2f}], "
+                                    f"Quat: [{data['q0']:7.4f}, {data['q1']:7.4f}, {data['q2']:7.4f}, {data['q3']:7.4f}], "
+                                    f"FreeAcc: [{data['free_acc_x']:7.2f}, {data['free_acc_y']:7.2f}, {data['free_acc_z']:7.2f}], "
+                                    f"Pressure: {data['pressure']:6d}")
                     except Exception as e:
                         logging.error(f"Error printing data: {e}", exc_info=True)
             
@@ -564,6 +636,10 @@ def collect_sensor_data(mtw_callbacks, data_rate, csv_writer):
         except Exception as e:
             logging.error(f"Error in main loop: {e}", exc_info=True)
             time.sleep(0.1)  # Pause briefly before continuing
+    
+    # Log duplicate statistics
+    total_duplicates = duplicate_filter.get_duplicate_count()
+    logging.info(f"Total duplicate packets filtered: {total_duplicates}")
 
 
 # Global variable for cleanup
@@ -737,10 +813,18 @@ if __name__ == '__main__':
         # Generate log filenames based on station ID and timestamp
         station_id = wireless_master_device.deviceId().toXsString()
         base_filename = generate_log_filename(station_id)
-        mtb_filename = f"{base_filename}.mtb"
-        csv_filename = f"{base_filename}.csv"
         
-        logging.info(f"Log files will be saved as: {base_filename}.mtb and {base_filename}.csv")
+        # Create logs directory if it doesn't exist
+        logs_dir = "logs"
+        if not os.path.exists(logs_dir):
+            os.makedirs(logs_dir)
+            logging.info(f"Created logs directory: {logs_dir}")
+        
+        # Create full file paths with logs directory
+        mtb_filename = os.path.join(logs_dir, f"{base_filename}.mtb")
+        csv_filename = os.path.join(logs_dir, f"{base_filename}.csv")
+        
+        logging.info(f"Log files will be saved in '{logs_dir}/' as: {base_filename}.mtb and {base_filename}.csv")
 
         logging.info("Creating a log file...")
         if wireless_master_device.createLogFile(mtb_filename) != xda.XRV_OK:

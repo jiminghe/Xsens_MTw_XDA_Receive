@@ -45,7 +45,9 @@ else:
     all([mtw_devices[i].resetOrientation(xda.XRM_Heading) for i in range(len(mtw_callbacks))])
 ```
 
-
+### Data loss about csv file:
+Due to the limitations of the wireless transmissions, you might experience data loss, so in the .csv file, the packet counter for specific sensor is not continous. You could do interpolation(LERP for acc, gyro, mag vectors, and SLERP for quaternions).
+In the case of .mtb file export into .txt with MT Manager, the interpolation is handled by the MT Manager itself.
 
 MIT License
 -----------
