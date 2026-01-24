@@ -163,6 +163,113 @@ class TimestampManager:
         self.last_packet_counter = None
 
 
+def generate_log_filename(station_id):
+    """
+    Generate log filename based on Awinda station ID and current timestamp.
+    Format: STATIONID_YYMMDD_HHMMSS
+    
+    Args:
+        station_id: Awinda station ID (e.g., "01200ACB")
+        
+    Returns:
+        str: Base filename without extension (e.g., "01200ACB_260124_195430")
+    """
+    from datetime import datetime
+    
+    now = datetime.now()
+    # Format: YYMMDD_HHMMSS
+    timestamp_str = now.strftime("%y%m%d_%H%M%S")
+    
+    # Combine station ID and timestamp
+    base_filename = f"{station_id}_{timestamp_str}"
+    
+    return base_filename
+
+
+def create_csv_file(csv_filename):
+    """
+    Create CSV file with header for sensor data logging.
+    
+    Args:
+        csv_filename: Full path to CSV file
+        
+    Returns:
+        file object: Opened CSV file ready for writing
+    """
+    import csv
+    
+    csv_file = open(csv_filename, 'w', newline='', encoding='utf-8')
+    csv_writer = csv.writer(csv_file, delimiter=',')
+    
+    # Write CSV header
+    header = [
+        'Sensor_ID',
+        'Time',
+        'PacketCounter',
+        'Status',
+        'Gyro_X(rad/s)',
+        'Gyro_Y(rad/s)',
+        'Gyro_Z(rad/s)',
+        'Acc_X(m/s^2)',
+        'Acc_Y(m/s^2)',
+        'Acc_Z(m/s^2)',
+        'Mag_X',
+        'Mag_Y',
+        'Mag_Z',
+        'Roll(deg)',
+        'Pitch(deg)',
+        'Yaw(deg)',
+        'Q0',
+        'Q1',
+        'Q2',
+        'Q3',
+        'FreeAcc_X',
+        'FreeAcc_Y',
+        'FreeAcc_Z',
+        'Pressure(Pa)'
+    ]
+    csv_writer.writerow(header)
+    
+    return csv_file, csv_writer
+
+
+def write_sensor_data_to_csv(csv_writer, sensor_data):
+    """
+    Write sensor data to CSV file.
+    
+    Args:
+        csv_writer: CSV writer object
+        sensor_data: Dictionary containing sensor data
+    """
+    row = [
+        sensor_data['device_id'],
+        f"{sensor_data['timestamp']:.5f}",
+        sensor_data['packet_counter'],
+        sensor_data['status'],  # Save as uint32, not hex
+        f"{sensor_data['gyr_x']:.6f}",
+        f"{sensor_data['gyr_y']:.6f}",
+        f"{sensor_data['gyr_z']:.6f}",
+        f"{sensor_data['acc_x']:.6f}",
+        f"{sensor_data['acc_y']:.6f}",
+        f"{sensor_data['acc_z']:.6f}",
+        f"{sensor_data['mag_x']:.6f}",
+        f"{sensor_data['mag_y']:.6f}",
+        f"{sensor_data['mag_z']:.6f}",
+        f"{sensor_data['roll']:.6f}",
+        f"{sensor_data['pitch']:.6f}",
+        f"{sensor_data['yaw']:.6f}",
+        f"{sensor_data['q0']:.6f}",
+        f"{sensor_data['q1']:.6f}",
+        f"{sensor_data['q2']:.6f}",
+        f"{sensor_data['q3']:.6f}",
+        f"{sensor_data['free_acc_x']:.6f}",
+        f"{sensor_data['free_acc_y']:.6f}",
+        f"{sensor_data['free_acc_z']:.6f}",
+        sensor_data['pressure']
+    ]
+    csv_writer.writerow(row)
+
+
 
 class XsPortInfoStr:
     def __str__(self, p):
@@ -274,13 +381,14 @@ class MtwCallback(xda.XsCallback):
             logging.error(f"Error in onLiveDataAvailable: {e}", exc_info=True)
 
 
-def collect_sensor_data(mtw_callbacks, data_rate):
+def collect_sensor_data(mtw_callbacks, data_rate, csv_writer):
     """
     Main data collection loop - runs until CTRL+C
     
     Args:
         mtw_callbacks: List of MtwCallback objects
         data_rate: Data rate in Hz (e.g., 80 for 80Hz)
+        csv_writer: CSV writer object for logging data
     """
     logging.info("\nMain loop. Press CTRL+C to quit\n")
     logging.info("Waiting for data available...")
@@ -299,6 +407,10 @@ def collect_sensor_data(mtw_callbacks, data_rate):
             'roll': 0.0,
             'pitch': 0.0,
             'yaw': 0.0,
+            'q0': 0.0,
+            'q1': 0.0,
+            'q2': 0.0,
+            'q3': 0.0,
             'gyr_x': 0.0,
             'gyr_y': 0.0,
             'gyr_z': 0.0,
@@ -308,6 +420,10 @@ def collect_sensor_data(mtw_callbacks, data_rate):
             'mag_x': 0.0,
             'mag_y': 0.0,
             'mag_z': 0.0,
+            'free_acc_x': 0.0,
+            'free_acc_y': 0.0,
+            'free_acc_z': 0.0,
+            'pressure': 0,
             'status': 0
         })
     
@@ -346,17 +462,28 @@ def collect_sensor_data(mtw_callbacks, data_rate):
                                 pitch = euler.y()
                                 yaw = euler.z()
                                 
+                                # Extract quaternion data
+                                q = packet.orientationQuaternion()
+                                q0 = q[0]
+                                q1 = q[1]
+                                q2 = q[2]
+                                q3 = q[3]
+                                
                                 # Compute timestamp based on packet counter and data rate
                                 computed_timestamp = timestamp_managers[i].get_timestamp(
                                     packet_counter, pc_timestamp
                                 )
                                 
-                                # Store timestamp and euler angles as Python types
+                                # Store timestamp, euler angles, and quaternion as Python types
                                 sensor_data[i]['timestamp'] = float(computed_timestamp)
                                 sensor_data[i]['packet_counter'] = int(packet_counter)
                                 sensor_data[i]['roll'] = float(roll)
                                 sensor_data[i]['pitch'] = float(pitch)
                                 sensor_data[i]['yaw'] = float(yaw)
+                                sensor_data[i]['q0'] = float(q0)
+                                sensor_data[i]['q1'] = float(q1)
+                                sensor_data[i]['q2'] = float(q2)
+                                sensor_data[i]['q3'] = float(q3)
                                 
                                 # Extract gyroscope data (calibrated)
                                 if packet.containsCalibratedGyroscopeData():
@@ -379,10 +506,25 @@ def collect_sensor_data(mtw_callbacks, data_rate):
                                     sensor_data[i]['mag_y'] = float(mag[1])
                                     sensor_data[i]['mag_z'] = float(mag[2])
                                 
+                                # Extract free acceleration (acceleration without gravity)
+                                if packet.containsFreeAcceleration():
+                                    free_acc = packet.freeAcceleration()
+                                    sensor_data[i]['free_acc_x'] = float(free_acc[0])
+                                    sensor_data[i]['free_acc_y'] = float(free_acc[1])
+                                    sensor_data[i]['free_acc_z'] = float(free_acc[2])
+                                
+                                # Extract pressure (XsPressure object with m_pressure attribute)
+                                if packet.containsPressure():
+                                    pressure_obj = packet.pressure()
+                                    sensor_data[i]['pressure'] = int(pressure_obj.m_pressure)
+                                
                                 # Extract status word
                                 if packet.containsStatus():
                                     status = packet.status()
                                     sensor_data[i]['status'] = int(status)
+                                
+                                # Write data to CSV file
+                                write_sensor_data_to_csv(csv_writer, sensor_data[i])
                                 
                             except Exception as e:
                                 logging.error(f"Error extracting data from packet {i}: {e}", exc_info=True)
@@ -407,7 +549,10 @@ def collect_sensor_data(mtw_callbacks, data_rate):
                                 f"Gyr: [{data['gyr_x']:7.2f}, {data['gyr_y']:7.2f}, {data['gyr_z']:7.2f}], "
                                 f"Acc: [{data['acc_x']:7.2f}, {data['acc_y']:7.2f}, {data['acc_z']:7.2f}], "
                                 f"Mag: [{data['mag_x']:7.2f}, {data['mag_y']:7.2f}, {data['mag_z']:7.2f}], "
-                                f"Euler: [{data['roll']:7.2f}, {data['pitch']:7.2f}, {data['yaw']:7.2f}]")
+                                f"Euler: [{data['roll']:7.2f}, {data['pitch']:7.2f}, {data['yaw']:7.2f}], "
+                                f"Quat: [{data['q0']:7.4f}, {data['q1']:7.4f}, {data['q2']:7.4f}, {data['q3']:7.4f}], "
+                                f"FreeAcc: [{data['free_acc_x']:7.2f}, {data['free_acc_y']:7.2f}, {data['free_acc_z']:7.2f}], "
+                                f"Pressure: {data['pressure']:6d}")
                     except Exception as e:
                         logging.error(f"Error printing data: {e}", exc_info=True)
             
@@ -589,12 +734,24 @@ if __name__ == '__main__':
         for i in range(len(mtw_devices)):
             mtw_devices[i].addCallbackHandler(mtw_callbacks[i])
 
+        # Generate log filenames based on station ID and timestamp
+        station_id = wireless_master_device.deviceId().toXsString()
+        base_filename = generate_log_filename(station_id)
+        mtb_filename = f"{base_filename}.mtb"
+        csv_filename = f"{base_filename}.csv"
+        
+        logging.info(f"Log files will be saved as: {base_filename}.mtb and {base_filename}.csv")
+
         logging.info("Creating a log file...")
-        logFileName = "logfile.mtb"
-        if wireless_master_device.createLogFile(logFileName) != xda.XRV_OK:
+        if wireless_master_device.createLogFile(mtb_filename) != xda.XRV_OK:
             raise RuntimeError("Failed to create a log file. Aborting.")
         else:
-            logging.info("Created a log file: %s" % logFileName)
+            logging.info("Created MTB log file: %s" % mtb_filename)
+        
+        # Create CSV file
+        logging.info("Creating CSV file...")
+        csv_file, csv_writer = create_csv_file(csv_filename)
+        logging.info("Created CSV file: %s" % csv_filename)
 
         logging.info("Starting recording...")
         ready_to_record = False
@@ -609,9 +766,14 @@ if __name__ == '__main__':
             raise RuntimeError("Failed to start recording. Aborting.")
 
         # Start the main data collection loop
-        collect_sensor_data(mtw_callbacks, actual_data_rate)
+        collect_sensor_data(mtw_callbacks, actual_data_rate, csv_writer)
 
         logging.info("Exited main loop")
+        
+        # Close CSV file
+        logging.info("Closing CSV file...")
+        csv_file.close()
+        logging.info("CSV file closed")
         logging.info("Setting config mode...")
         try:
             if not wireless_master_device.gotoConfig():
