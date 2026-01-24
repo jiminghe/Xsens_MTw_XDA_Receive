@@ -81,6 +81,88 @@ def get_high_accuracy_timestamp():
     return time.time_ns() / 1_000_000_000.0
 
 
+class TimestampManager:
+    """
+    Manages timestamp computation based on packet counter and data rate.
+    Handles packet counter wraparound and missing packets.
+    """
+    
+    def __init__(self, data_rate):
+        """
+        Initialize timestamp manager.
+        
+        Args:
+            data_rate: Data rate in Hz (e.g., 80 for 80Hz)
+        """
+        self.data_rate = data_rate
+        self.dt = 1.0 / data_rate  # Time between packets in seconds
+        
+        self.first_timestamp = None
+        self.first_packet_counter = None
+        self.last_packet_counter = None
+        
+        # uint32 max value for wraparound detection
+        self.UINT32_MAX = 0xFFFFFFFF
+        
+    def get_timestamp(self, packet_counter, pc_timestamp=None):
+        """
+        Get computed timestamp for a packet.
+        
+        Args:
+            packet_counter: Current packet counter (uint32)
+            pc_timestamp: PC timestamp when packet was received (optional, used for first packet)
+            
+        Returns:
+            float: Computed timestamp in seconds since epoch
+        """
+        # First packet - initialize
+        if self.first_timestamp is None:
+            if pc_timestamp is None:
+                pc_timestamp = get_high_accuracy_timestamp()
+            
+            self.first_timestamp = pc_timestamp
+            self.first_packet_counter = packet_counter
+            self.last_packet_counter = packet_counter
+            
+            return self.first_timestamp
+        
+        # Compute packet counter difference, handling wraparound
+        counter_diff = self._compute_counter_diff(packet_counter, self.first_packet_counter)
+        
+        # Computed timestamp = first_timestamp + (counter_diff * dt)
+        computed_timestamp = self.first_timestamp + (counter_diff * self.dt)
+        
+        # Update last packet counter
+        self.last_packet_counter = packet_counter
+        
+        return computed_timestamp
+    
+    def _compute_counter_diff(self, current_counter, reference_counter):
+        """
+        Compute difference between two packet counters, handling uint32 wraparound.
+        
+        Args:
+            current_counter: Current packet counter
+            reference_counter: Reference packet counter
+            
+        Returns:
+            int: Number of packets between reference and current
+        """
+        if current_counter >= reference_counter:
+            # Normal case - no wraparound
+            return current_counter - reference_counter
+        else:
+            # Wraparound occurred
+            # From reference to UINT32_MAX, then from 0 to current
+            return (self.UINT32_MAX - reference_counter + 1) + current_counter
+    
+    def reset(self):
+        """Reset the timestamp manager."""
+        self.first_timestamp = None
+        self.first_packet_counter = None
+        self.last_packet_counter = None
+
+
 
 class XsPortInfoStr:
     def __str__(self, p):
@@ -192,15 +274,19 @@ class MtwCallback(xda.XsCallback):
             logging.error(f"Error in onLiveDataAvailable: {e}", exc_info=True)
 
 
-def collect_sensor_data(mtw_callbacks):
+def collect_sensor_data(mtw_callbacks, data_rate):
     """
     Main data collection loop - runs until CTRL+C
     
     Args:
         mtw_callbacks: List of MtwCallback objects
+        data_rate: Data rate in Hz (e.g., 80 for 80Hz)
     """
     logging.info("\nMain loop. Press CTRL+C to quit\n")
     logging.info("Waiting for data available...")
+
+    # Create timestamp managers for each sensor
+    timestamp_managers = [TimestampManager(data_rate) for _ in range(len(mtw_callbacks))]
 
     # Store as simple Python values to avoid object reference issues
     # This approach is safer than holding C++ object references
@@ -246,8 +332,8 @@ def collect_sensor_data(mtw_callbacks):
                         packet = mtw_callbacks[i].getOldestPacket()
                         if packet is not None:
                             try:
-                                # Capture timestamp immediately when packet is received
-                                timestamp = get_high_accuracy_timestamp()
+                                # Capture PC timestamp when packet is received
+                                pc_timestamp = get_high_accuracy_timestamp()
                                 
                                 # CRITICAL: Extract data immediately like in the reference code
                                 # Get the euler object temporarily
@@ -260,8 +346,13 @@ def collect_sensor_data(mtw_callbacks):
                                 pitch = euler.y()
                                 yaw = euler.z()
                                 
+                                # Compute timestamp based on packet counter and data rate
+                                computed_timestamp = timestamp_managers[i].get_timestamp(
+                                    packet_counter, pc_timestamp
+                                )
+                                
                                 # Store timestamp and euler angles as Python types
-                                sensor_data[i]['timestamp'] = float(timestamp)
+                                sensor_data[i]['timestamp'] = float(computed_timestamp)
                                 sensor_data[i]['packet_counter'] = int(packet_counter)
                                 sensor_data[i]['roll'] = float(roll)
                                 sensor_data[i]['pitch'] = float(pitch)
@@ -448,6 +539,9 @@ if __name__ == '__main__':
 
         if not wireless_master_device.setUpdateRate(new_update_rate):
             raise RuntimeError(f"Failed to set update rate: {wireless_master_device}")
+        
+        # Store the actual update rate for timestamp computation
+        actual_data_rate = new_update_rate
 
         logging.info("Disabling radio channel if previously enabled...")
 
@@ -515,7 +609,7 @@ if __name__ == '__main__':
             raise RuntimeError("Failed to start recording. Aborting.")
 
         # Start the main data collection loop
-        collect_sensor_data(mtw_callbacks)
+        collect_sensor_data(mtw_callbacks, actual_data_rate)
 
         logging.info("Exited main loop")
         logging.info("Setting config mode...")
