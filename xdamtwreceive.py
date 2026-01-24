@@ -703,8 +703,10 @@ signal.signal(signal.SIGTERM, signal_handler)
 
 
 if __name__ == '__main__':
-    desired_update_rate = 75
-    desired_radio_channel = 19
+    # availabe data rates: 40, 60, 80, 100, 120Hz.
+    desired_update_rate = 60
+    # available radio channels: 11-25
+    desired_radio_channel = 11
 
     wireless_master_callback = WirelessMasterCallback()
     mtw_callbacks = []
