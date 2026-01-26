@@ -80,6 +80,7 @@ class MainWindow(QMainWindow):
         self.wireless_master_callback = None
         self.wireless_master_device = None
         self.mtw_callbacks = []
+        self.mtw_devices = []
         
         # Data management
         self.sensor_data = []
@@ -159,25 +160,26 @@ class MainWindow(QMainWindow):
         self.cleanup()
 
     def connect_signals(self):
-            """Connect all signals to slots"""
-            # User -> GUI
-            self.ui.enableButton.clicked.connect(self.toggle_radio_enabled)
-            self.ui.startMeasurementButton.clicked.connect(self.toggle_measurement)
-            self.ui.recordingButton.clicked.connect(self.toggle_recording)
-            self.ui.clearLogPushButton.clicked.connect(self.clear_log_window)
-            self.ui.connectedMtwList.itemClicked.connect(self.clear_connected_mtw_data_labels)
-            self.ui.connectedMtwList.currentItemChanged.connect(self.on_mtw_selection_changed)
-            
-            # XDA -> GUI signals
-            self.wirelessMasterDetected.connect(self.handle_wireless_master_detected)
-            self.dockedMtwDetected.connect(self.handle_docked_mtw_detected)
-            self.mtwUndocked.connect(self.handle_mtw_undocked)
-            self.openPortSuccessful.connect(self.handle_open_port_successful)
-            self.openPortFailed.connect(self.handle_open_port_failed)
-            
-            # MTW callback -> GUI signals
-            self.mtwWirelessSignal.connect(self.handle_mtw_wireless)
-            self.mtwDisconnectedSignal.connect(self.handle_mtw_disconnected)
+        """Connect all signals to slots"""
+        # User -> GUI
+        self.ui.enableButton.clicked.connect(self.toggle_radio_enabled)
+        self.ui.startMeasurementButton.clicked.connect(self.toggle_measurement)
+        self.ui.resetHeadingButton.clicked.connect(self.reset_heading)  # NEW
+        self.ui.recordingButton.clicked.connect(self.toggle_recording)
+        self.ui.clearLogPushButton.clicked.connect(self.clear_log_window)
+        self.ui.connectedMtwList.itemClicked.connect(self.clear_connected_mtw_data_labels)
+        self.ui.connectedMtwList.currentItemChanged.connect(self.on_mtw_selection_changed)
+        
+        # XDA -> GUI signals
+        self.wirelessMasterDetected.connect(self.handle_wireless_master_detected)
+        self.dockedMtwDetected.connect(self.handle_docked_mtw_detected)
+        self.mtwUndocked.connect(self.handle_mtw_undocked)
+        self.openPortSuccessful.connect(self.handle_open_port_successful)
+        self.openPortFailed.connect(self.handle_open_port_failed)
+        
+        # MTW callback -> GUI signals
+        self.mtwWirelessSignal.connect(self.handle_mtw_wireless)
+        self.mtwDisconnectedSignal.connect(self.handle_mtw_disconnected)
     
     def create_signal_emitter(self, signal_name):
         """Create a signal emitter for callback events"""
@@ -263,87 +265,94 @@ class MainWindow(QMainWindow):
         self.ui.logWindow.clear()
     
     def set_widgets_states(self):
-            """Set widget states based on current state"""
-            if self.state == State.DETECTING:
-                self.ui.stateDiagramLabel.setText("DETECTING")
-            
-            elif self.state == State.CONNECTING:
-                self.ui.enableButton.setEnabled(False)
-                self.ui.stateDiagramLabel.setText("CONNECTING")
-                self.log("Scanning for station.")
-                self.ui.recordingButton.setEnabled(False)
-            
-            elif self.state == State.CONNECTED:
-                self.ui.startMeasurementButton.setEnabled(False)
-                self.ui.channelCaptionLabel.setEnabled(True)
-                self.ui.channelComboBox.setEnabled(True)
-                self.ui.enableButton.setEnabled(True)
-                self.ui.enableButton.setText("Enable")
-                self.ui.updateRateCaptionLabel.setEnabled(False)
-                self.ui.allowedUpdateRatesComboBox.setEnabled(False)
-                self.ui.stateDiagramLabel.setText("CONNECTED")
-                self.ui.recordingButton.setEnabled(False)
-            
-            elif self.state == State.ENABLED:
-                self.ui.startMeasurementButton.setEnabled(self.ui.connectedMtwList.count() > 0)
-                self.ui.startMeasurementButton.setText("Start Measurement")
-                self.ui.enableButton.setText("Disable")
-                self.ui.enableButton.setEnabled(True)
-                self.ui.channelCaptionLabel.setEnabled(False)
-                self.ui.channelComboBox.setEnabled(False)
-                self.ui.updateRateCaptionLabel.setEnabled(True)
-                self.ui.allowedUpdateRatesComboBox.setEnabled(True)
-                self.ui.stateDiagramLabel.setText("ENABLED")
-                self.ui.recordingButton.setEnabled(False)
-            
-            elif self.state == State.OPERATIONAL:
-                self.ui.startMeasurementButton.setEnabled(self.ui.connectedMtwList.count() > 0)
-                self.ui.startMeasurementButton.setText("Start Measurement")
-                self.ui.enableButton.setText("Disable")
-                self.ui.enableButton.setEnabled(True)
-                self.ui.channelCaptionLabel.setEnabled(False)
-                self.ui.channelComboBox.setEnabled(False)
-                self.ui.updateRateCaptionLabel.setEnabled(True)
-                self.ui.allowedUpdateRatesComboBox.setEnabled(True)
-                self.ui.stateDiagramLabel.setText("OPERATIONAL")
-                self.ui.recordingButton.setEnabled(False)
-            
-            elif self.state in [State.AWAIT_MEASUREMENT_START, State.AWAIT_RECORDING_START]:
-                self.ui.enableButton.setEnabled(False)
-                self.ui.startMeasurementButton.setText("Waiting for start...")
-                self.ui.startMeasurementButton.setEnabled(False)
-                self.ui.updateRateCaptionLabel.setEnabled(False)
-                self.ui.allowedUpdateRatesComboBox.setEnabled(False)
-                self.ui.stateDiagramLabel.setText("AWAIT START")
-                self.ui.recordingButton.setEnabled(False)
-            
-            elif self.state == State.MEASURING:
-                self.ui.enableButton.setEnabled(False)
-                self.ui.startMeasurementButton.setText("Stop measuring")
-                self.ui.startMeasurementButton.setEnabled(True)
-                self.ui.updateRateCaptionLabel.setEnabled(False)
-                self.ui.allowedUpdateRatesComboBox.setEnabled(False)
-                self.ui.recordingButton.setText("Start recording")
-                self.ui.recordingButton.setEnabled(True)
-                # REMOVED: logFilenameCaptionLabel and logFilenameEdit enable/disable
-                self.ui.flushingCaptionLabel.setEnabled(False)
-                self.ui.flushingProgressBar.setEnabled(False)
-                self.ui.flushingProgressBar.setValue(0)
-                self.ui.stateDiagramLabel.setText("MEASURING")
-            
-            elif self.state == State.RECORDING:
-                self.ui.recordingButton.setEnabled(True)
-                self.ui.recordingButton.setText("Stop recording")
-                # REMOVED: logFilenameCaptionLabel and logFilenameEdit enable/disable
-                self.ui.startMeasurementButton.setEnabled(False)
-                self.ui.stateDiagramLabel.setText("RECORDING")
-            
-            elif self.state == State.FLUSHING:
-                self.ui.recordingButton.setEnabled(False)
-                self.ui.recordingButton.setText("Flushing")
-                self.ui.flushingCaptionLabel.setEnabled(True)
-                self.ui.flushingProgressBar.setEnabled(True)
-                self.ui.stateDiagramLabel.setText("FLUSHING")
+        """Set widget states based on current state"""
+        if self.state == State.DETECTING:
+            self.ui.stateDiagramLabel.setText("DETECTING")
+            self.ui.resetHeadingButton.setEnabled(False)
+        
+        elif self.state == State.CONNECTING:
+            self.ui.enableButton.setEnabled(False)
+            self.ui.stateDiagramLabel.setText("CONNECTING")
+            self.log("Scanning for station.")
+            self.ui.recordingButton.setEnabled(False)
+            self.ui.resetHeadingButton.setEnabled(False)
+        
+        elif self.state == State.CONNECTED:
+            self.ui.startMeasurementButton.setEnabled(False)
+            self.ui.channelCaptionLabel.setEnabled(True)
+            self.ui.channelComboBox.setEnabled(True)
+            self.ui.enableButton.setEnabled(True)
+            self.ui.enableButton.setText("Enable")
+            self.ui.updateRateCaptionLabel.setEnabled(False)
+            self.ui.allowedUpdateRatesComboBox.setEnabled(False)
+            self.ui.stateDiagramLabel.setText("CONNECTED")
+            self.ui.recordingButton.setEnabled(False)
+            self.ui.resetHeadingButton.setEnabled(False)
+        
+        elif self.state == State.ENABLED:
+            self.ui.startMeasurementButton.setEnabled(self.ui.connectedMtwList.count() > 0)
+            self.ui.startMeasurementButton.setText("Start Measurement")
+            self.ui.enableButton.setText("Disable")
+            self.ui.enableButton.setEnabled(True)
+            self.ui.channelCaptionLabel.setEnabled(False)
+            self.ui.channelComboBox.setEnabled(False)
+            self.ui.updateRateCaptionLabel.setEnabled(True)
+            self.ui.allowedUpdateRatesComboBox.setEnabled(True)
+            self.ui.stateDiagramLabel.setText("ENABLED")
+            self.ui.recordingButton.setEnabled(False)
+            self.ui.resetHeadingButton.setEnabled(False)
+        
+        elif self.state == State.OPERATIONAL:
+            self.ui.startMeasurementButton.setEnabled(self.ui.connectedMtwList.count() > 0)
+            self.ui.startMeasurementButton.setText("Start Measurement")
+            self.ui.enableButton.setText("Disable")
+            self.ui.enableButton.setEnabled(True)
+            self.ui.channelCaptionLabel.setEnabled(False)
+            self.ui.channelComboBox.setEnabled(False)
+            self.ui.updateRateCaptionLabel.setEnabled(True)
+            self.ui.allowedUpdateRatesComboBox.setEnabled(True)
+            self.ui.stateDiagramLabel.setText("OPERATIONAL")
+            self.ui.recordingButton.setEnabled(False)
+            self.ui.resetHeadingButton.setEnabled(False)
+        
+        elif self.state in [State.AWAIT_MEASUREMENT_START, State.AWAIT_RECORDING_START]:
+            self.ui.enableButton.setEnabled(False)
+            self.ui.startMeasurementButton.setText("Waiting for start...")
+            self.ui.startMeasurementButton.setEnabled(False)
+            self.ui.updateRateCaptionLabel.setEnabled(False)
+            self.ui.allowedUpdateRatesComboBox.setEnabled(False)
+            self.ui.stateDiagramLabel.setText("AWAIT START")
+            self.ui.recordingButton.setEnabled(False)
+            self.ui.resetHeadingButton.setEnabled(False)
+        
+        elif self.state == State.MEASURING:
+            self.ui.enableButton.setEnabled(False)
+            self.ui.startMeasurementButton.setText("Stop measuring")
+            self.ui.startMeasurementButton.setEnabled(True)
+            self.ui.updateRateCaptionLabel.setEnabled(False)
+            self.ui.allowedUpdateRatesComboBox.setEnabled(False)
+            self.ui.recordingButton.setText("Start recording")
+            self.ui.recordingButton.setEnabled(True)
+            self.ui.resetHeadingButton.setEnabled(True)  # ENABLE when measuring
+            self.ui.flushingCaptionLabel.setEnabled(False)
+            self.ui.flushingProgressBar.setEnabled(False)
+            self.ui.flushingProgressBar.setValue(0)
+            self.ui.stateDiagramLabel.setText("MEASURING")
+        
+        elif self.state == State.RECORDING:
+            self.ui.recordingButton.setEnabled(True)
+            self.ui.recordingButton.setText("Stop recording")
+            self.ui.startMeasurementButton.setEnabled(False)
+            self.ui.resetHeadingButton.setEnabled(True)  # Keep enabled during recording
+            self.ui.stateDiagramLabel.setText("RECORDING")
+        
+        elif self.state == State.FLUSHING:
+            self.ui.recordingButton.setEnabled(False)
+            self.ui.recordingButton.setText("Flushing")
+            self.ui.flushingCaptionLabel.setEnabled(True)
+            self.ui.flushingProgressBar.setEnabled(True)
+            self.ui.resetHeadingButton.setEnabled(False)
+            self.ui.stateDiagramLabel.setText("FLUSHING")
 
     def scan_ports(self):
         """Scan for ports and detect devices"""
@@ -604,6 +613,9 @@ class MainWindow(QMainWindow):
         # Get MTW devices and create callbacks
         mtw_devices = self.my_xda.get_mtw_devices()
         
+        # Store reference to MTW devices for reset heading functionality
+        self.mtw_devices = mtw_devices
+        
         self.log("Attaching callback handlers to MTWs...")
         self.mtw_callbacks = [
             MtwCallback(i, mtw_devices[i]) for i in range(len(mtw_devices))
@@ -648,6 +660,10 @@ class MainWindow(QMainWindow):
             callback.device().clearCallbackHandlers()
         
         self.mtw_callbacks.clear()
+        
+        # Clear device reference
+        self.mtw_devices = []
+        
         self.state = State.OPERATIONAL
         self.set_widgets_states()
     
@@ -877,3 +893,33 @@ class MainWindow(QMainWindow):
         """Request battery levels from MTws"""
         # TODO: Implement battery level requests cycling through MTws
         pass
+
+    def reset_heading(self):
+            """Reset heading (yaw) for all MTW sensors"""
+            try:
+                if not hasattr(self, 'mtw_devices') or len(self.mtw_devices) == 0:
+                    self.log("ERROR: No MTW devices available for heading reset")
+                    return
+                
+                self.log("Resetting heading for all MTW sensors...")
+                
+                # Reset heading for all MTW devices
+                success_count = 0
+                for i, device in enumerate(self.mtw_devices):
+                    try:
+                        if device.resetOrientation(xda.XRM_Heading):
+                            success_count += 1
+                            logging.debug(f"Reset heading for MTW {i}: {device.deviceId()}")
+                        else:
+                            logging.warning(f"Failed to reset heading for MTW {i}: {device.deviceId()}")
+                    except Exception as e:
+                        logging.error(f"Error resetting heading for MTW {i}: {e}", exc_info=True)
+                
+                if success_count == len(self.mtw_devices):
+                    self.log(f"Successfully reset heading for all {success_count} MTW sensors")
+                else:
+                    self.log(f"Reset heading: {success_count}/{len(self.mtw_devices)} successful")
+            
+            except Exception as e:
+                logging.error(f"Error in reset_heading: {e}", exc_info=True)
+                self.log(f"ERROR: Failed to reset heading - {str(e)}")

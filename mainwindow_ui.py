@@ -59,20 +59,23 @@ class Ui_MainWindow(object):
         self.startMeasurementButton.setText("Start Measurement")
         self.startMeasurementButton.setEnabled(False)
         
-        # REMOVED: logFilenameCaptionLabel and logFilenameEdit
+        self.resetHeadingButton = QtWidgets.QPushButton(self.stationPropertiesGroupBox)
+        self.resetHeadingButton.setGeometry(QtCore.QRect(10, 185, 131, 31)) 
+        self.resetHeadingButton.setText("Reset Heading")
+        self.resetHeadingButton.setEnabled(False)
         
         self.recordingButton = QtWidgets.QPushButton(self.stationPropertiesGroupBox)
-        self.recordingButton.setGeometry(QtCore.QRect(10, 190, 131, 31))  # Moved up from 220
+        self.recordingButton.setGeometry(QtCore.QRect(10, 220, 131, 31))  # Moved down to make room
         self.recordingButton.setText("Start recording")
         self.recordingButton.setEnabled(False)
         
         self.flushingCaptionLabel = QtWidgets.QLabel(self.stationPropertiesGroupBox)
-        self.flushingCaptionLabel.setGeometry(QtCore.QRect(10, 230, 46, 20))  # Moved up from 260
+        self.flushingCaptionLabel.setGeometry(QtCore.QRect(10, 260, 46, 20))  # Moved down
         self.flushingCaptionLabel.setText("Flushing:")
         self.flushingCaptionLabel.setEnabled(False)
         
         self.flushingProgressBar = QtWidgets.QProgressBar(self.stationPropertiesGroupBox)
-        self.flushingProgressBar.setGeometry(QtCore.QRect(60, 230, 81, 23))  # Moved up from 260
+        self.flushingProgressBar.setGeometry(QtCore.QRect(60, 260, 81, 23))  # Moved down
         self.flushingProgressBar.setValue(0)
         self.flushingProgressBar.setEnabled(False)
         
