@@ -14,10 +14,15 @@ class WirelessMasterCallback(xda.XsCallback):
     Tracks connected MTW devices and their connectivity state
     """
     
-    def __init__(self):
+    def __init__(self, main_window=None):
         super().__init__()
         self.m_connected_mtws = set()
         self.m_mutex = Lock()
+        self.main_window = main_window  # Reference to MainWindow for signal emission
+    
+    def set_main_window(self, main_window):
+        """Set reference to main window for signal emission"""
+        self.main_window = main_window
     
     def get_connected_mtws(self):
         """Get copy of connected MTWs set (thread-safe)"""
@@ -34,6 +39,9 @@ class WirelessMasterCallback(xda.XsCallback):
                 if new_state == xda.XCS_Disconnected:
                     logging.info(f"EVENT: MTW Disconnected -> {dev.deviceId()}")
                     self.m_connected_mtws.discard(dev)
+                    # Emit signal to GUI
+                    if self.main_window:
+                        self.main_window.mtwDisconnectedSignal.emit(dev.deviceId())
                     
                 elif new_state == xda.XCS_Rejected:
                     logging.info(f"EVENT: MTW Rejected -> {dev.deviceId()}")
@@ -46,6 +54,9 @@ class WirelessMasterCallback(xda.XsCallback):
                 elif new_state == xda.XCS_Wireless:
                     logging.info(f"EVENT: MTW Connected -> {dev.deviceId()}")
                     self.m_connected_mtws.add(dev)
+                    # Emit signal to GUI
+                    if self.main_window:
+                        self.main_window.mtwWirelessSignal.emit(dev.deviceId())
                     
                 elif new_state == xda.XCS_File:
                     logging.info(f"EVENT: MTW File -> {dev.deviceId()}")

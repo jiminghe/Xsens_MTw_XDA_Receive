@@ -1,6 +1,6 @@
 """
-Main application window logic
-Coordinates XDA, callbacks, and data collection
+Main application window with PyQt5 GUI
+Coordinates XDA, callbacks, and data collection with GUI display
 """
 
 import os
@@ -10,10 +10,15 @@ import logging
 import signal
 import atexit
 from datetime import datetime
+from threading import Thread, Lock
+
+from PyQt5.QtWidgets import QMainWindow, QListWidgetItem, QMessageBox
+from PyQt5.QtCore import QTimer, QThread, pyqtSignal, QElapsedTimer, Qt, QVariant
+from PyQt5.QtGui import QPixmap, QTextCursor
 
 import xsensdeviceapi as xda
-import keyboard
 
+from mainwindow_ui import Ui_MainWindow
 from myxda import MyXda
 from callbacks import WirelessMasterCallback, MtwCallback
 from connected_mtw_data import ConnectedMTwData
@@ -22,7 +27,7 @@ from duplicate_filter import DuplicatePacketFilter
 
 
 class State:
-    """Application state machine (similar to C++ enum)"""
+    """Application state machine"""
     DETECTING = "DETECTING"
     CONNECTING = "CONNECTING"
     CONNECTED = "CONNECTED"
@@ -35,23 +40,37 @@ class State:
     FLUSHING = "FLUSHING"
 
 
-class MainWindow:
+class XdaThread(QThread):
+    """Separate thread for XDA operations"""
+    pass
+
+
+class MainWindow(QMainWindow):
     """
-    Main application class
-    Manages the overall application flow and state machine
+    Main application window with PyQt5 GUI
     """
     
-    def __init__(self, desired_update_rate=60, desired_radio_channel=11):
-        """
-        Initialize MainWindow
+    # Define signals as class attributes
+    wirelessMasterDetected = pyqtSignal(object)
+    dockedMtwDetected = pyqtSignal(object)
+    mtwUndocked = pyqtSignal(object)
+    openPortSuccessful = pyqtSignal(object)
+    openPortFailed = pyqtSignal(object)
+    
+    # Add these new signals for MTW events
+    mtwWirelessSignal = pyqtSignal(object)
+    mtwDisconnectedSignal = pyqtSignal(object)
+    
+    def __init__(self, parent=None):
+        # Call parent constructor FIRST
+        super(MainWindow, self).__init__(parent)
         
-        Args:
-            desired_update_rate: Desired update rate in Hz
-            desired_radio_channel: Radio channel (11-25)
-        """
-        self.desired_update_rate = desired_update_rate
-        self.desired_radio_channel = desired_radio_channel
-        self.actual_data_rate = desired_update_rate
+        # Setup UI
+        self.ui = Ui_MainWindow()
+        self.ui.setupUi(self)
+        
+        # Set window title
+        self.setWindowTitle("Awinda Monitor")
         
         # State
         self.state = State.DETECTING
@@ -71,33 +90,129 @@ class MainWindow:
         self.csv_file = None
         self.csv_writer = None
         
+        # QT components
+        self.port_scan_timer = None
+        self.battery_level_request_timer = None
+        self.xda_thread = None
+        self.timestamp = QElapsedTimer()
+        
+        # Mutex for thread safety
+        self.mutex = Lock()
+        
         # Cleanup flag
         self.cleanup_done = False
         
-        # Register cleanup handlers
-        atexit.register(self.cleanup)
-        signal.signal(signal.SIGINT, self.signal_handler)
-        signal.signal(signal.SIGTERM, self.signal_handler)
+        # Data collection thread
+        self.data_collection_active = False
+        self.data_collection_thread = None
+        
+        # Initialize components
+        self.initialize_components()
+
+    def initialize_components(self):
+            """Initialize all components after UI is set up"""
+            try:
+                # Create XDA instance
+                self.my_xda = MyXda()
+                
+                # Create callback with reference to this window
+                self.wireless_master_callback = WirelessMasterCallback(self)
+                
+                # Connect signals to slots
+                self.connect_signals()
+                
+                # Start timestamp
+                self.timestamp.start()
+                
+                # Create timers
+                self.port_scan_timer = QTimer(self)
+                self.port_scan_timer.setInterval(1000)
+                self.port_scan_timer.timeout.connect(self.scan_ports)
+                
+                self.battery_level_request_timer = QTimer(self)
+                self.battery_level_request_timer.setInterval(1000)
+                self.battery_level_request_timer.timeout.connect(self.request_battery_levels)
+                
+                # Create XDA thread
+                self.xda_thread = XdaThread(self)
+                
+                # Start
+                self.log("Detecting...")
+                self.set_widgets_states()
+                
+                # Start timers
+                self.xda_thread.start()
+                self.port_scan_timer.start()
+                self.battery_level_request_timer.start()
+                
+                # Register cleanup handlers
+                atexit.register(self.cleanup)
+                signal.signal(signal.SIGINT, self.signal_handler)
+                signal.signal(signal.SIGTERM, self.signal_handler)
+                
+            except Exception as e:
+                logging.error(f"Error initializing components: {e}", exc_info=True)
+                raise
+    
+    def __del__(self):
+        """Destructor"""
+        self.cleanup()
+
+    def connect_signals(self):
+            """Connect all signals to slots"""
+            # User -> GUI
+            self.ui.enableButton.clicked.connect(self.toggle_radio_enabled)
+            self.ui.startMeasurementButton.clicked.connect(self.toggle_measurement)
+            self.ui.recordingButton.clicked.connect(self.toggle_recording)
+            self.ui.clearLogPushButton.clicked.connect(self.clear_log_window)
+            self.ui.connectedMtwList.itemClicked.connect(self.clear_connected_mtw_data_labels)
+            self.ui.connectedMtwList.currentItemChanged.connect(self.on_mtw_selection_changed)
+            
+            # XDA -> GUI signals
+            self.wirelessMasterDetected.connect(self.handle_wireless_master_detected)
+            self.dockedMtwDetected.connect(self.handle_docked_mtw_detected)
+            self.mtwUndocked.connect(self.handle_mtw_undocked)
+            self.openPortSuccessful.connect(self.handle_open_port_successful)
+            self.openPortFailed.connect(self.handle_open_port_failed)
+            
+            # MTW callback -> GUI signals
+            self.mtwWirelessSignal.connect(self.handle_mtw_wireless)
+            self.mtwDisconnectedSignal.connect(self.handle_mtw_disconnected)
+    
+    def create_signal_emitter(self, signal_name):
+        """Create a signal emitter for callback events"""
+        # This is a workaround since we can't directly emit signals from callbacks
+        def emitter(device_id):
+            if signal_name == 'mtwWireless':
+                self.handle_mtw_wireless(device_id)
+            elif signal_name == 'mtwDisconnected':
+                self.handle_mtw_disconnected(device_id)
+        return emitter
     
     def signal_handler(self, sig, frame):
         """Handle CTRL+C interrupt"""
         logging.info(f"Signal {sig} received")
-        print("\n\nInterrupt received, cleaning up...")
         self.cleanup()
-        logging.info("Cleanup complete. Exiting.")
-        print("Cleanup complete. Exiting.")
         os._exit(0)
     
     def cleanup(self):
         """Cleanup resources on exit"""
         if self.cleanup_done:
-            logging.info("Cleanup already performed, skipping...")
             return
         
         self.cleanup_done = True
         logging.info("Cleanup function called")
         
         try:
+            # Stop data collection
+            self.data_collection_active = False
+            if self.data_collection_thread is not None:
+                self.data_collection_thread.join(timeout=2.0)
+            
+            # Stop timers
+            self.port_scan_timer.stop()
+            self.battery_level_request_timer.stop()
+            
             # Close CSV file
             if self.csv_file is not None:
                 logging.info("Closing CSV file...")
@@ -124,139 +239,372 @@ class MainWindow:
                     self.my_xda.reset()
                 except Exception as e:
                     logging.debug(f"Error in reset: {e}")
+            
+            # Stop XDA thread
+            self.xda_thread.quit()
+            self.xda_thread.wait()
         
         except Exception as e:
             logging.error(f"Error during cleanup: {e}", exc_info=True)
     
-    def find_closest_update_rate(self, supported_rates, desired_rate):
-        """Find closest supported update rate to desired rate"""
-        if not supported_rates:
-            return 0
-        if len(supported_rates) == 1:
-            return supported_rates[0]
-        return min(supported_rates, key=lambda x: abs(x - desired_rate))
+    def closeEvent(self, event):
+        """Handle window close event"""
+        self.cleanup()
+        event.accept()
     
-    def generate_log_filename(self, station_id):
-        """
-        Generate log filename based on station ID and timestamp
-        Format: STATIONID_YYMMDD_HHMMSS
-        """
-        now = datetime.now()
-        timestamp_str = now.strftime("%y%m%d_%H%M%S")
-        return f"{station_id}_{timestamp_str}"
+    def log(self, message):
+        """Log message to GUI window"""
+        self.ui.logWindow.moveCursor(QTextCursor.End)
+        self.ui.logWindow.insertPlainText(f"[{self.timestamp.elapsed()}] {message}\n")
+        logging.info(message)
     
-    def create_csv_file(self, csv_filename):
-        """Create CSV file with header"""
-        self.csv_file = open(csv_filename, 'w', newline='', encoding='utf-8')
-        self.csv_writer = csv.writer(self.csv_file, delimiter=',')
-        
-        # Write CSV header
-        header = [
-            'Sensor_ID', 'Time', 'PacketCounter', 'Status',
-            'Gyro_X(rad/s)', 'Gyro_Y(rad/s)', 'Gyro_Z(rad/s)',
-            'Acc_X(m/s^2)', 'Acc_Y(m/s^2)', 'Acc_Z(m/s^2)',
-            'Mag_X', 'Mag_Y', 'Mag_Z',
-            'Roll(deg)', 'Pitch(deg)', 'Yaw(deg)',
-            'Q0', 'Q1', 'Q2', 'Q3',
-            'FreeAcc_X', 'FreeAcc_Y', 'FreeAcc_Z',
-            'Pressure(Pa)'
-        ]
-        self.csv_writer.writerow(header)
-        logging.info(f"Created CSV file: {csv_filename}")
+    def clear_log_window(self):
+        """Clear log window"""
+        self.ui.logWindow.clear()
     
-    def initialize_xda(self):
-        """Initialize XDA and find wireless master"""
-        # Create XDA instance
-        self.my_xda = MyXda()
+    def set_widgets_states(self):
+            """Set widget states based on current state"""
+            if self.state == State.DETECTING:
+                self.ui.stateDiagramLabel.setText("DETECTING")
+            
+            elif self.state == State.CONNECTING:
+                self.ui.enableButton.setEnabled(False)
+                self.ui.stateDiagramLabel.setText("CONNECTING")
+                self.log("Scanning for station.")
+                self.ui.recordingButton.setEnabled(False)
+            
+            elif self.state == State.CONNECTED:
+                self.ui.startMeasurementButton.setEnabled(False)
+                self.ui.channelCaptionLabel.setEnabled(True)
+                self.ui.channelComboBox.setEnabled(True)
+                self.ui.enableButton.setEnabled(True)
+                self.ui.enableButton.setText("Enable")
+                self.ui.updateRateCaptionLabel.setEnabled(False)
+                self.ui.allowedUpdateRatesComboBox.setEnabled(False)
+                self.ui.stateDiagramLabel.setText("CONNECTED")
+                self.ui.recordingButton.setEnabled(False)
+            
+            elif self.state == State.ENABLED:
+                self.ui.startMeasurementButton.setEnabled(self.ui.connectedMtwList.count() > 0)
+                self.ui.startMeasurementButton.setText("Start Measurement")
+                self.ui.enableButton.setText("Disable")
+                self.ui.enableButton.setEnabled(True)
+                self.ui.channelCaptionLabel.setEnabled(False)
+                self.ui.channelComboBox.setEnabled(False)
+                self.ui.updateRateCaptionLabel.setEnabled(True)
+                self.ui.allowedUpdateRatesComboBox.setEnabled(True)
+                self.ui.stateDiagramLabel.setText("ENABLED")
+                self.ui.recordingButton.setEnabled(False)
+            
+            elif self.state == State.OPERATIONAL:
+                self.ui.startMeasurementButton.setEnabled(self.ui.connectedMtwList.count() > 0)
+                self.ui.startMeasurementButton.setText("Start Measurement")
+                self.ui.enableButton.setText("Disable")
+                self.ui.enableButton.setEnabled(True)
+                self.ui.channelCaptionLabel.setEnabled(False)
+                self.ui.channelComboBox.setEnabled(False)
+                self.ui.updateRateCaptionLabel.setEnabled(True)
+                self.ui.allowedUpdateRatesComboBox.setEnabled(True)
+                self.ui.stateDiagramLabel.setText("OPERATIONAL")
+                self.ui.recordingButton.setEnabled(False)
+            
+            elif self.state in [State.AWAIT_MEASUREMENT_START, State.AWAIT_RECORDING_START]:
+                self.ui.enableButton.setEnabled(False)
+                self.ui.startMeasurementButton.setText("Waiting for start...")
+                self.ui.startMeasurementButton.setEnabled(False)
+                self.ui.updateRateCaptionLabel.setEnabled(False)
+                self.ui.allowedUpdateRatesComboBox.setEnabled(False)
+                self.ui.stateDiagramLabel.setText("AWAIT START")
+                self.ui.recordingButton.setEnabled(False)
+            
+            elif self.state == State.MEASURING:
+                self.ui.enableButton.setEnabled(False)
+                self.ui.startMeasurementButton.setText("Stop measuring")
+                self.ui.startMeasurementButton.setEnabled(True)
+                self.ui.updateRateCaptionLabel.setEnabled(False)
+                self.ui.allowedUpdateRatesComboBox.setEnabled(False)
+                self.ui.recordingButton.setText("Start recording")
+                self.ui.recordingButton.setEnabled(True)
+                # REMOVED: logFilenameCaptionLabel and logFilenameEdit enable/disable
+                self.ui.flushingCaptionLabel.setEnabled(False)
+                self.ui.flushingProgressBar.setEnabled(False)
+                self.ui.flushingProgressBar.setValue(0)
+                self.ui.stateDiagramLabel.setText("MEASURING")
+            
+            elif self.state == State.RECORDING:
+                self.ui.recordingButton.setEnabled(True)
+                self.ui.recordingButton.setText("Stop recording")
+                # REMOVED: logFilenameCaptionLabel and logFilenameEdit enable/disable
+                self.ui.startMeasurementButton.setEnabled(False)
+                self.ui.stateDiagramLabel.setText("RECORDING")
+            
+            elif self.state == State.FLUSHING:
+                self.ui.recordingButton.setEnabled(False)
+                self.ui.recordingButton.setText("Flushing")
+                self.ui.flushingCaptionLabel.setEnabled(True)
+                self.ui.flushingProgressBar.setEnabled(True)
+                self.ui.stateDiagramLabel.setText("FLUSHING")
+
+    def scan_ports(self):
+        """Scan for ports and detect devices"""
+        try:
+            detected_devices = self.my_xda.scan_ports()
+            
+            # Check for wireless master
+            for port in detected_devices:
+                if port.deviceId().isWirelessMaster():
+                    if self.state == State.DETECTING:
+                        self.wirelessMasterDetected.emit(port)
+                elif port.deviceId().isMtw():
+                    self.dockedMtwDetected.emit(port)
         
-        # Find wireless master
-        wireless_master_port = self.my_xda.find_wireless_master()
-        if wireless_master_port is None:
-            raise RuntimeError("No wireless masters found")
+        except Exception as e:
+            logging.error(f"Error scanning ports: {e}", exc_info=True)
+    
+    def handle_wireless_master_detected(self, port):
+        """Handle wireless master detected"""
+        if self.state == State.DETECTING:
+            self.log(f"Master Detected. Port: {port.portName()}, ID: {port.deviceId()}")
+            self.state = State.CONNECTING
+            self.set_widgets_states()
+            
+            # Open port
+            if self.my_xda.open_port(port):
+                self.openPortSuccessful.emit(port)
+            else:
+                self.openPortFailed.emit(port)
+    
+    def handle_docked_mtw_detected(self, port):
+        """Handle docked MTw detected"""
+        self.log(f"MTw Docked. Port: {port.portName()}, ID: {port.deviceId()}")
         
-        # Open port
-        if not self.my_xda.open_port(wireless_master_port):
-            raise RuntimeError(f"Failed to open port {wireless_master_port.portName()}")
+        mtw_id = str(port.deviceId())
+        items = self.ui.dockedMtwList.findItems(mtw_id, Qt.MatchFixedString)
+        if not items:
+            self.ui.dockedMtwList.addItem(mtw_id)
         
-        # Get wireless master device
-        self.wireless_master_device = self.my_xda.get_device(wireless_master_port.deviceId())
+        self.ui.dockedMtwListGroupBox.setTitle(
+            f"Docked MTw list ({self.ui.dockedMtwList.count()}):"
+        )
+    
+    def handle_mtw_undocked(self, port):
+        """Handle MTw undocked"""
+        self.log(f"MTw Undocked. Port: {port.portName()}, ID: {port.deviceId()}")
+        
+        mtw_id = str(port.deviceId())
+        for row in range(self.ui.dockedMtwList.count()):
+            item = self.ui.dockedMtwList.item(row)
+            if item.text() == mtw_id:
+                self.ui.dockedMtwList.takeItem(row)
+                break
+        
+        self.ui.dockedMtwListGroupBox.setTitle(
+            f"Docked MTw list ({self.ui.dockedMtwList.count()}):"
+        )
+    
+    def handle_open_port_successful(self, port):
+        """Handle port opened successfully"""
+        if self.state == State.CONNECTING:
+            if port.deviceId().isWirelessMaster():
+                # Set station ID label
+                self.ui.stationIdLabel.setText(str(port.deviceId()))
+                
+                # Get device
+                self.wireless_master_device = self.my_xda.get_device(port.deviceId())
+                if self.wireless_master_device is None:
+                    self.log("ERROR: Failed to get wireless master device")
+                    return
+                
+                # Attach callback
+                self.wireless_master_device.addCallbackHandler(self.wireless_master_callback)
+                
+                self.state = State.CONNECTED
+                self.log(f"Master Connected. Port: {port.portName()}, ID: {port.deviceId()}")
+                
+                # Ensure radio is disabled initially
+                if self.wireless_master_device.isRadioEnabled():
+                    self.set_radio_channel(-1)
+                
+                self.set_widgets_states()
+    
+    def handle_open_port_failed(self, port):
+        """Handle port open failed"""
+        self.log(f"Connect to device failed. Port: {port.portName()}")
+        
+        if self.state == State.CONNECTING:
+            self.log("Closing XDA")
+            self.my_xda.reset()
+            self.state = State.DETECTING
+            self.set_widgets_states()
+    
+    def handle_mtw_wireless(self, device_id):
+            """Handle MTw connected wirelessly"""
+            try:
+                # Convert device_id to string
+                if hasattr(device_id, 'toString'):
+                    mtw_id_str = device_id.toString()
+                elif hasattr(device_id, 'toXsString'):
+                    mtw_id_str = device_id.toXsString()
+                else:
+                    mtw_id_str = str(device_id)
+                
+                self.log(f"MTw Connected. ID: {mtw_id_str}")
+                
+                items = self.ui.connectedMtwList.findItems(mtw_id_str, Qt.MatchFixedString)
+                if not items:
+                    # New MTw - add it
+                    mtw_data = ConnectedMTwData()
+                    mtw_data.device_id = mtw_id_str
+                    mtw_data.rssi = 0
+                    
+                    item = QListWidgetItem()
+                    item.setText(mtw_id_str)
+                    item.setData(Qt.UserRole, mtw_data)
+                    
+                    self.ui.connectedMtwList.addItem(item)
+                    self.ui.connectedMtwList.setCurrentItem(item)
+                    
+                    self.ui.connectedMtwListGroupBox.setTitle(
+                        f"Connected MTw list ({self.ui.connectedMtwList.count()}):"
+                    )
+                
+                # Enable start measurement button if in ENABLED state
+                if self.state == State.ENABLED:
+                    self.ui.startMeasurementButton.setEnabled(self.ui.connectedMtwList.count() > 0)
+                    self.log(f"Start Measurement button enabled (count: {self.ui.connectedMtwList.count()})")
+            
+            except Exception as e:
+                logging.error(f"Error in handle_mtw_wireless: {e}", exc_info=True)
+        
+    def handle_mtw_disconnected(self, device_id):
+        """Handle MTw disconnected"""
+        try:
+            # Convert device_id to string
+            if hasattr(device_id, 'toString'):
+                mtw_id_str = device_id.toString()
+            elif hasattr(device_id, 'toXsString'):
+                mtw_id_str = device_id.toXsString()
+            else:
+                mtw_id_str = str(device_id)
+            
+            self.log(f"MTw Disconnected. ID: {mtw_id_str}")
+            
+            items = self.ui.connectedMtwList.findItems(mtw_id_str, Qt.MatchFixedString)
+            if items:
+                row = self.ui.connectedMtwList.row(items[0])
+                self.ui.connectedMtwList.takeItem(row)
+                
+                self.ui.connectedMtwListGroupBox.setTitle(
+                    f"Connected MTw list ({self.ui.connectedMtwList.count()}):"
+                )
+                
+                if self.state == State.ENABLED:
+                    self.ui.startMeasurementButton.setEnabled(self.ui.connectedMtwList.count() > 0)
+        
+        except Exception as e:
+            logging.error(f"Error in handle_mtw_disconnected: {e}", exc_info=True)
+    
+    def toggle_radio_enabled(self):
+        """Toggle radio enabled/disabled"""
+        channel = self.ui.channelComboBox.currentText()
+        if self.state == State.CONNECTED:
+            self.set_radio_channel(int(channel))
+        else:
+            self.set_radio_channel(-1)
+    
+    def set_radio_channel(self, channel):
+        """Set radio channel"""
         if self.wireless_master_device is None:
-            raise RuntimeError("Failed to get wireless master device")
+            return
         
-        logging.info(f"Wireless master device: {self.wireless_master_device.deviceId()}")
-        
-        # Set config mode
-        if not self.wireless_master_device.gotoConfig():
-            raise RuntimeError("Failed to goto config mode")
-        
-        # Attach callback
-        self.wireless_master_callback = WirelessMasterCallback()
-        self.wireless_master_device.addCallbackHandler(self.wireless_master_callback)
-        
-        self.state = State.CONNECTED
-    
-    def configure_wireless_master(self):
-        """Configure wireless master (update rate and radio channel)"""
-        # Get supported update rates
-        supported_rates = xda.XsDevice.supportedUpdateRates(
-            self.wireless_master_device, xda.XDI_None
-        )
-        logging.info(f"Supported update rates: {list(supported_rates)}")
-        
-        # Find closest update rate
-        new_update_rate = self.find_closest_update_rate(
-            list(supported_rates), self.desired_update_rate
-        )
-        logging.info(f"Setting update rate to {new_update_rate} Hz...")
-        
-        if not self.wireless_master_device.setUpdateRate(new_update_rate):
-            raise RuntimeError("Failed to set update rate")
-        
-        self.actual_data_rate = new_update_rate
-        
-        # Disable radio if enabled
-        if self.wireless_master_device.isRadioEnabled():
-            if not self.wireless_master_device.disableRadio():
-                raise RuntimeError("Failed to disable radio")
-        
-        # Enable radio on desired channel
-        logging.info(f"Enabling radio on channel {self.desired_radio_channel}...")
-        if not self.wireless_master_device.enableRadio(self.desired_radio_channel):
-            raise RuntimeError("Failed to enable radio")
-        
-        self.state = State.ENABLED
-    
-    def wait_for_mtw_connections(self):
-        """Wait for MTW devices to connect wirelessly"""
-        logging.info("Waiting for MTW to wirelessly connect...")
-        logging.info("Press 'Y' to start measurement when ready.\n")
-        
-        connected_mtw_count = 0
-        wait_for_connections = True
-        
-        while wait_for_connections:
-            time.sleep(0.1)
-            next_count = len(self.wireless_master_callback.get_connected_mtws())
+        if self.wireless_master_device.enableRadio(channel):
+            if channel != -1:
+                self.log(f"Master Enabled. ID: {self.wireless_master_device.deviceId()}, Channel: {channel}")
+                
+                # Get supported update rates
+                supported_rates = xda.XsDevice.supportedUpdateRates(
+                    self.wireless_master_device, xda.XDI_None
+                )
+                max_update_rate = self.wireless_master_device.maximumUpdateRate()
+                
+                # Populate update rate combo box
+                self.ui.allowedUpdateRatesComboBox.clear()
+                for rate in supported_rates:
+                    if rate <= max_update_rate:
+                        self.ui.allowedUpdateRatesComboBox.addItem(str(rate))
+                
+                # Select current update rate
+                current_rate = self.wireless_master_device.updateRate()
+                index = self.ui.allowedUpdateRatesComboBox.findText(str(current_rate))
+                if index >= 0:
+                    self.ui.allowedUpdateRatesComboBox.setCurrentIndex(index)
+                
+                self.state = State.ENABLED
+                
+                # Set default update rate of 75 Hz if available
+                index_75 = self.ui.allowedUpdateRatesComboBox.findText("75")
+                if index_75 >= 0:
+                    self.ui.allowedUpdateRatesComboBox.setCurrentIndex(index_75)
+            else:
+                self.log(f"Master Disabled. ID: {self.wireless_master_device.deviceId()}")
+                self.ui.connectedMtwList.clear()
+                self.state = State.CONNECTED
             
-            if next_count != connected_mtw_count:
-                logging.info(f"Number of connected MTWs: {next_count}")
-                connected_mtw_count = next_count
-            
-            wait_for_connections = not keyboard.is_pressed('y')
+            self.set_widgets_states()
+        else:
+            if channel != -1:
+                self.log(f"Failed to enable wireless master. Channel: {channel}")
+            else:
+                self.log("Failed to disable wireless master")
+    
+    def toggle_measurement(self):
+        """Toggle measurement on/off"""
+        if self.wireless_master_device is None:
+            return
         
-        logging.info(f"Starting with {connected_mtw_count} connected MTWs")
+        if self.state in [State.ENABLED, State.OPERATIONAL]:
+            # Start measurement
+            desired_rate = int(self.ui.allowedUpdateRatesComboBox.currentText())
+            current_rate = self.wireless_master_device.updateRate()
+            
+            if desired_rate != current_rate:
+                if self.wireless_master_device.setUpdateRate(desired_rate):
+                    self.log(f"Update rate set to {desired_rate} Hz")
+                else:
+                    self.log(f"Failed to set update rate to {desired_rate} Hz")
+            
+            # Check if highest update rate
+            if self.ui.allowedUpdateRatesComboBox.currentIndex() == 0:
+                msg = QMessageBox()
+                msg.setText("Note: at the highest update rate\nrecording will be at effective update rate.")
+                msg.exec_()
+            
+            backup_state = self.state
+            self.state = State.AWAIT_MEASUREMENT_START
+            
+            if self.wireless_master_device.gotoMeasurement():
+                self.log("Starting measurement...")
+                self.start_measurement()
+            else:
+                self.state = backup_state
+                self.log("Failed to start measurement")
+            
+            self.set_widgets_states()
+        
+        elif self.state == State.MEASURING:
+            # Stop measurement
+            if self.wireless_master_device.gotoConfig():
+                self.log("Stopping measurement...")
+                self.stop_measurement()
+            else:
+                self.log("Failed to stop measurement")
     
     def start_measurement(self):
         """Start measurement mode"""
-        logging.info("Starting measurement...")
-        
-        if not self.wireless_master_device.gotoMeasurement():
-            raise RuntimeError("Failed to goto measurement mode")
-        
         # Get MTW devices and create callbacks
         mtw_devices = self.my_xda.get_mtw_devices()
         
-        logging.info("Attaching callback handlers to MTWs...")
+        self.log("Attaching callback handlers to MTWs...")
         self.mtw_callbacks = [
             MtwCallback(i, mtw_devices[i]) for i in range(len(mtw_devices))
         ]
@@ -269,15 +617,48 @@ class MainWindow:
         for i, callback in enumerate(self.mtw_callbacks):
             self.sensor_data[i].device_id = str(callback.device().deviceId())
         
+        # Get actual data rate
+        actual_data_rate = self.wireless_master_device.updateRate()
+        
         # Initialize timestamp managers
         self.timestamp_managers = [
-            TimestampManager(self.actual_data_rate) for _ in range(len(self.mtw_callbacks))
+            TimestampManager(actual_data_rate) for _ in range(len(self.mtw_callbacks))
         ]
         
         # Initialize duplicate filter
         self.duplicate_filter = DuplicatePacketFilter(len(self.mtw_callbacks))
         
         self.state = State.MEASURING
+        self.set_widgets_states()
+        
+        # Start data collection in background thread
+        self.data_collection_active = True
+        self.data_collection_thread = Thread(target=self.collect_sensor_data, daemon=True)
+        self.data_collection_thread.start()
+    
+    def stop_measurement(self):
+        """Stop measurement mode"""
+        # Stop data collection
+        self.data_collection_active = False
+        if self.data_collection_thread is not None:
+            self.data_collection_thread.join(timeout=2.0)
+        
+        # Clear callbacks
+        for callback in self.mtw_callbacks:
+            callback.device().clearCallbackHandlers()
+        
+        self.mtw_callbacks.clear()
+        self.state = State.OPERATIONAL
+        self.set_widgets_states()
+    
+    def toggle_recording(self):
+        """Toggle recording on/off"""
+        if self.state == State.MEASURING:
+            # Start recording
+            self.start_recording()
+        elif self.state == State.RECORDING:
+            # Stop recording
+            self.stop_recording()
     
     def start_recording(self):
         """Start recording to files"""
@@ -289,208 +670,210 @@ class MainWindow:
         logs_dir = "logs"
         if not os.path.exists(logs_dir):
             os.makedirs(logs_dir)
-            logging.info(f"Created logs directory: {logs_dir}")
         
         # Full file paths
         mtb_filename = os.path.join(logs_dir, f"{base_filename}.mtb")
         csv_filename = os.path.join(logs_dir, f"{base_filename}.csv")
         
-        logging.info(f"Log files: {base_filename}.mtb and {base_filename}.csv")
+        self.log(f"Creating log files: {base_filename}")
         
         # Create MTB log file
         if self.wireless_master_device.createLogFile(mtb_filename) != xda.XRV_OK:
-            raise RuntimeError("Failed to create MTB log file")
-        logging.info(f"Created MTB log file: {mtb_filename}")
+            self.log("Failed to create MTB log file")
+            return
+        
+        self.log(f"Created MTB log file: {mtb_filename}")
         
         # Create CSV file
         self.create_csv_file(csv_filename)
         
-        # Wait for data available
-        logging.info("Waiting for data available from all MTWs...")
-        ready_to_record = False
-        while not ready_to_record:
-            ready_to_record = all([
-                self.mtw_callbacks[i].data_available() 
-                for i in range(len(self.mtw_callbacks))
-            ])
-            if not ready_to_record:
-                time.sleep(0.5)
-        
         # Start recording
-        if not self.wireless_master_device.startRecording():
-            raise RuntimeError("Failed to start recording")
+        if self.wireless_master_device.startRecording():
+            self.log("Recording started")
+            self.state = State.RECORDING
+            self.set_widgets_states()
+        else:
+            self.log("Failed to start recording")
+    
+    def stop_recording(self):
+        """Stop recording"""
+        self.state = State.FLUSHING
+        self.wireless_master_device.stopRecording()
+        self.log("Stopping recording...")
         
-        logging.info("Recording started")
-        self.state = State.RECORDING
+        # Close CSV file
+        if self.csv_file is not None:
+            self.csv_file.close()
+            self.csv_file = None
+        
+        # Close MTB file
+        self.wireless_master_device.closeLogFile()
+        
+        self.state = State.MEASURING
+        self.set_widgets_states()
+    
+    def generate_log_filename(self, station_id):
+        """Generate log filename"""
+        now = datetime.now()
+        timestamp_str = now.strftime("%y%m%d_%H%M%S")
+        return f"{station_id}_{timestamp_str}"
+    
+    def create_csv_file(self, csv_filename):
+        """Create CSV file with header"""
+        self.csv_file = open(csv_filename, 'w', newline='', encoding='utf-8')
+        self.csv_writer = csv.writer(self.csv_file, delimiter=',')
+        
+        header = [
+            'Sensor_ID', 'Time', 'PacketCounter', 'Status',
+            'Gyro_X(rad/s)', 'Gyro_Y(rad/s)', 'Gyro_Z(rad/s)',
+            'Acc_X(m/s^2)', 'Acc_Y(m/s^2)', 'Acc_Z(m/s^2)',
+            'Mag_X', 'Mag_Y', 'Mag_Z',
+            'Roll(deg)', 'Pitch(deg)', 'Yaw(deg)',
+            'Q0', 'Q1', 'Q2', 'Q3',
+            'FreeAcc_X', 'FreeAcc_Y', 'FreeAcc_Z',
+            'Pressure(Pa)'
+        ]
+        self.csv_writer.writerow(header)
+        self.log(f"Created CSV file: {csv_filename}")
     
     def collect_sensor_data(self):
-        """Main data collection loop"""
-        logging.info("\nMain loop. Press CTRL+C to quit\n")
-        
-        print_counter = 0
-        loop_counter = 0
-        
-        while True:
+        """Background thread for collecting sensor data"""
+        while self.data_collection_active:
             try:
-                loop_counter += 1
-                if loop_counter % 1000 == 0:
-                    logging.debug(f"Loop iteration: {loop_counter}")
+                time.sleep(0.001)
                 
-                time.sleep(0.001)  # Small sleep to prevent 100% CPU
-                
-                new_data_available = False
-                sensors_updated = [False] * len(self.mtw_callbacks)
-                
-                # Process packets from each MTW
                 for i in range(len(self.mtw_callbacks)):
-                    try:
-                        if self.mtw_callbacks[i].data_available():
-                            new_data_available = True
-                            packet = self.mtw_callbacks[i].get_oldest_packet()
-                            
-                            if packet is not None:
-                                try:
-                                    # Extract packet counter
-                                    packet_counter = packet.packetCounter()
+                    if self.mtw_callbacks[i].data_available():
+                        packet = self.mtw_callbacks[i].get_oldest_packet()
+                        
+                        if packet is not None:
+                            try:
+                                packet_counter = packet.packetCounter()
+                                
+                                # Check for duplicates
+                                is_duplicate = self.duplicate_filter.is_duplicate(i, packet_counter)
+                                
+                                if not is_duplicate:
+                                    pc_timestamp = get_high_accuracy_timestamp()
+                                    computed_timestamp = self.timestamp_managers[i].get_timestamp(
+                                        packet_counter, pc_timestamp
+                                    )
                                     
-                                    # Check for duplicates
-                                    is_duplicate = self.duplicate_filter.is_duplicate(i, packet_counter)
+                                    # Extract all data
+                                    if packet.containsOrientation():
+                                        euler = packet.orientationEuler()
+                                        self.sensor_data[i].set_orientation_euler(
+                                            float(euler.x()), float(euler.y()), float(euler.z())
+                                        )
                                     
-                                    if not is_duplicate:
-                                        # Get PC timestamp
-                                        pc_timestamp = get_high_accuracy_timestamp()
-                                        
-                                        # Compute timestamp
-                                        computed_timestamp = self.timestamp_managers[i].get_timestamp(
-                                            packet_counter, pc_timestamp
-                                        )
-                                        
-                                        # Extract orientation (Euler)
-                                        if packet.containsOrientation():
-                                            euler = packet.orientationEuler()
-                                            self.sensor_data[i].set_orientation_euler(
-                                                float(euler.x()),
-                                                float(euler.y()),
-                                                float(euler.z())
-                                            )
-                                        
-                                        # Extract quaternion
-                                        q = packet.orientationQuaternion()
-                                        self.sensor_data[i].set_orientation_quaternion(
-                                            float(q[0]), float(q[1]), float(q[2]), float(q[3])
-                                        )
-                                        
-                                        # Store timestamp and packet counter
-                                        self.sensor_data[i].timestamp = float(computed_timestamp)
-                                        self.sensor_data[i].packet_counter = int(packet_counter)
-                                        
-                                        # Extract gyroscope
-                                        if packet.containsCalibratedGyroscopeData():
-                                            gyr = packet.calibratedGyroscopeData()
-                                            self.sensor_data[i].gyr_x = float(gyr[0])
-                                            self.sensor_data[i].gyr_y = float(gyr[1])
-                                            self.sensor_data[i].gyr_z = float(gyr[2])
-                                        
-                                        # Extract accelerometer
-                                        if packet.containsCalibratedAcceleration():
-                                            acc = packet.calibratedAcceleration()
-                                            self.sensor_data[i].acc_x = float(acc[0])
-                                            self.sensor_data[i].acc_y = float(acc[1])
-                                            self.sensor_data[i].acc_z = float(acc[2])
-                                        
-                                        # Extract magnetometer
-                                        if packet.containsCalibratedMagneticField():
-                                            mag = packet.calibratedMagneticField()
-                                            self.sensor_data[i].mag_x = float(mag[0])
-                                            self.sensor_data[i].mag_y = float(mag[1])
-                                            self.sensor_data[i].mag_z = float(mag[2])
-                                        
-                                        # Extract free acceleration
-                                        if packet.containsFreeAcceleration():
-                                            free_acc = packet.freeAcceleration()
-                                            self.sensor_data[i].free_acc_x = float(free_acc[0])
-                                            self.sensor_data[i].free_acc_y = float(free_acc[1])
-                                            self.sensor_data[i].free_acc_z = float(free_acc[2])
-                                        
-                                        # Extract pressure
-                                        if packet.containsPressure():
-                                            pressure_obj = packet.pressure()
-                                            self.sensor_data[i].pressure = int(pressure_obj.m_pressure)
-                                        
-                                        # Extract status
-                                        if packet.containsStatus():
-                                            self.sensor_data[i].status = int(packet.status())
-                                        
-                                        # Write to CSV
+                                    q = packet.orientationQuaternion()
+                                    self.sensor_data[i].set_orientation_quaternion(
+                                        float(q[0]), float(q[1]), float(q[2]), float(q[3])
+                                    )
+                                    
+                                    self.sensor_data[i].timestamp = float(computed_timestamp)
+                                    self.sensor_data[i].packet_counter = int(packet_counter)
+                                    
+                                    if packet.containsCalibratedGyroscopeData():
+                                        gyr = packet.calibratedGyroscopeData()
+                                        self.sensor_data[i].gyr_x = float(gyr[0])
+                                        self.sensor_data[i].gyr_y = float(gyr[1])
+                                        self.sensor_data[i].gyr_z = float(gyr[2])
+                                    
+                                    if packet.containsCalibratedAcceleration():
+                                        acc = packet.calibratedAcceleration()
+                                        self.sensor_data[i].acc_x = float(acc[0])
+                                        self.sensor_data[i].acc_y = float(acc[1])
+                                        self.sensor_data[i].acc_z = float(acc[2])
+                                    
+                                    if packet.containsCalibratedMagneticField():
+                                        mag = packet.calibratedMagneticField()
+                                        self.sensor_data[i].mag_x = float(mag[0])
+                                        self.sensor_data[i].mag_y = float(mag[1])
+                                        self.sensor_data[i].mag_z = float(mag[2])
+                                    
+                                    if packet.containsFreeAcceleration():
+                                        free_acc = packet.freeAcceleration()
+                                        self.sensor_data[i].free_acc_x = float(free_acc[0])
+                                        self.sensor_data[i].free_acc_y = float(free_acc[1])
+                                        self.sensor_data[i].free_acc_z = float(free_acc[2])
+                                    
+                                    if packet.containsPressure():
+                                        pressure_obj = packet.pressure()
+                                        self.sensor_data[i].pressure = int(pressure_obj.m_pressure)
+                                    
+                                    if packet.containsStatus():
+                                        self.sensor_data[i].status = int(packet.status())
+                                    
+                                    # RSSI
+                                    self.sensor_data[i].rssi = packet.rssi()
+                                    
+                                    # Write to CSV if recording
+                                    if self.state == State.RECORDING and self.csv_writer is not None:
                                         self.csv_writer.writerow(self.sensor_data[i].to_csv_row())
-                                        
-                                        # Mark sensor as updated
-                                        sensors_updated[i] = True
-                                
-                                except Exception as e:
-                                    logging.error(f"Error extracting packet data {i}: {e}", exc_info=True)
-                                
-                                # Delete packet
-                                self.mtw_callbacks[i].delete_oldest_packet()
-                    
-                    except Exception as e:
-                        logging.error(f"Error processing callback {i}: {e}", exc_info=True)
-                
-                # Print data periodically
-                if new_data_available and print_counter % 1 == 0:
-                    try:
-                        for i in range(len(self.mtw_callbacks)):
-                            if sensors_updated[i]:
-                                data = self.sensor_data[i]
-                                print(f"[{i}]: ID: {data.device_id}, "
-                                      f"Time: {data.timestamp:.5f}, "
-                                      f"Pkt: {data.packet_counter:5d}, "
-                                      f"Status: 0x{data.status:08X}, "
-                                      f"Euler: [{data.roll:7.2f}, {data.pitch:7.2f}, {data.yaw:7.2f}]")
-                    except Exception as e:
-                        logging.error(f"Error printing data: {e}", exc_info=True)
-                
-                if new_data_available:
-                    print_counter += 1
+                                    
+                                    # Update GUI for selected MTw
+                                    self.update_mtw_display(i)
+                            
+                            except Exception as e:
+                                logging.error(f"Error extracting packet data: {e}", exc_info=True)
+                            
+                            self.mtw_callbacks[i].delete_oldest_packet()
             
-            except KeyboardInterrupt:
-                logging.info("Keyboard interrupt in main loop")
-                break
             except Exception as e:
-                logging.error(f"Error in main loop: {e}", exc_info=True)
-                time.sleep(0.1)
-        
-        # Log statistics
-        total_duplicates = self.duplicate_filter.get_duplicate_count()
-        logging.info(f"Total duplicate packets filtered: {total_duplicates}")
+                logging.error(f"Error in data collection: {e}", exc_info=True)
     
-    def run(self):
-        """Main application run method"""
+    def update_mtw_display(self, mtw_index):
+        """Update MTw display in GUI"""
         try:
-            # Initialize XDA
-            self.initialize_xda()
+            # Find MTw in list
+            device_id = self.sensor_data[mtw_index].device_id
+            items = self.ui.connectedMtwList.findItems(device_id, Qt.MatchFixedString)
             
-            # Configure wireless master
-            self.configure_wireless_master()
+            if items:
+                item = items[0]
+                # Update stored data
+                item.setData(Qt.UserRole, self.sensor_data[mtw_index])
+                
+                # If this MTw is selected, update display
+                if self.ui.connectedMtwList.currentItem() == item:
+                    self.display_mtw_data(self.sensor_data[mtw_index])
+        
+        except Exception as e:
+            logging.error(f"Error updating MTw display: {e}", exc_info=True)
+    
+    def display_mtw_data(self, mtw_data):
+        """Display MTw data in properties panel"""
+        try:
+            self.ui.batteryLevelLabel.setText(f"{mtw_data.battery_level} [%]")
+            self.ui.rssiLabel.setText(f"{mtw_data.rssi} [dBm]")
+            self.ui.effUpdateRateLabel.setText(f"{mtw_data.effective_update_rate:.1f} [%]")
             
-            # Wait for MTW connections
-            self.wait_for_mtw_connections()
-            
-            # Start measurement
-            self.start_measurement()
-            
-            # Start recording
-            self.start_recording()
-            
-            # Collect data
-            self.collect_sensor_data()
-            
-        except KeyboardInterrupt:
-            logging.info("Keyboard interrupt detected")
-            print("\n****ABORT****")
-        except Exception as ex:
-            logging.error(f"Exception: {ex}", exc_info=True)
-            print("****ABORT****")
-        finally:
-            if not self.cleanup_done:
-                self.cleanup()
+            if mtw_data.contains_orientation:
+                self.ui.rollLabel.setText(f"{mtw_data.roll:7.2f} [deg]")
+                self.ui.pitchLabel.setText(f"{mtw_data.pitch:7.2f} [deg]")
+                self.ui.yawLabel.setText(f"{mtw_data.yaw:7.2f} [deg]")
+        
+        except Exception as e:
+            logging.error(f"Error displaying MTw data: {e}", exc_info=True)
+    
+    def clear_connected_mtw_data_labels(self):
+        """Clear MTw data labels"""
+        self.ui.batteryLevelLabel.setText("-")
+        self.ui.rssiLabel.setText("-")
+        self.ui.effUpdateRateLabel.setText("-")
+        self.ui.rollLabel.setText("-")
+        self.ui.pitchLabel.setText("-")
+        self.ui.yawLabel.setText("-")
+    
+    def on_mtw_selection_changed(self, current, previous):
+        """Handle MTw selection change"""
+        if current is not None:
+            mtw_data = current.data(Qt.UserRole)
+            if mtw_data is not None and isinstance(mtw_data, ConnectedMTwData):
+                self.display_mtw_data(mtw_data)
+    
+    def request_battery_levels(self):
+        """Request battery levels from MTws"""
+        # TODO: Implement battery level requests cycling through MTws
+        pass

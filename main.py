@@ -1,9 +1,11 @@
 """
-Main entry point for Xsens Awinda application
+Main entry point for Xsens Awinda GUI application
 """
 
 import sys
 import logging
+
+from PyQt5.QtWidgets import QApplication, QMessageBox
 
 from mainwindow import MainWindow
 
@@ -21,28 +23,26 @@ logging.basicConfig(
 
 def main():
     """Main function"""
-    # Configuration
-    desired_update_rate = 60  # Available: 40, 60, 80, 100, 120 Hz
-    desired_radio_channel = 11  # Available: 11-25
+    app = QApplication(sys.argv)
     
     try:
-        # Create and run main window
-        main_window = MainWindow(
-            desired_update_rate=desired_update_rate,
-            desired_radio_channel=desired_radio_channel
-        )
+        window = MainWindow()
+        window.show()
         
-        main_window.run()
-        
-        logging.info("Successful exit.")
-        print("Press [ENTER] to continue.")
-        input()
-        
+        return app.exec_()
+    
     except Exception as e:
         logging.error(f"Fatal error: {e}", exc_info=True)
-        print(f"Fatal error: {e}")
-        sys.exit(1)
+        
+        msg = QMessageBox()
+        msg.setIcon(QMessageBox.Critical)
+        msg.setText("Fatal Error")
+        msg.setInformativeText(str(e))
+        msg.setWindowTitle("Error")
+        msg.exec_()
+        
+        return 1
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())
