@@ -786,54 +786,80 @@ class MainWindow(QMainWindow):
                                         packet_counter, pc_timestamp
                                     )
                                     
-                                    # Extract all data
+                                    # Extract orientation (Euler)
                                     if packet.containsOrientation():
                                         euler = packet.orientationEuler()
                                         self.sensor_data[i].set_orientation_euler(
                                             float(euler.x()), float(euler.y()), float(euler.z())
                                         )
                                     
+                                    # Extract quaternion
                                     q = packet.orientationQuaternion()
                                     self.sensor_data[i].set_orientation_quaternion(
                                         float(q[0]), float(q[1]), float(q[2]), float(q[3])
                                     )
                                     
+                                    # Store timestamp and packet counter
                                     self.sensor_data[i].timestamp = float(computed_timestamp)
                                     self.sensor_data[i].packet_counter = int(packet_counter)
                                     
+                                    # Extract gyroscope
                                     if packet.containsCalibratedGyroscopeData():
                                         gyr = packet.calibratedGyroscopeData()
                                         self.sensor_data[i].gyr_x = float(gyr[0])
                                         self.sensor_data[i].gyr_y = float(gyr[1])
                                         self.sensor_data[i].gyr_z = float(gyr[2])
                                     
+                                    # Extract accelerometer
                                     if packet.containsCalibratedAcceleration():
                                         acc = packet.calibratedAcceleration()
                                         self.sensor_data[i].acc_x = float(acc[0])
                                         self.sensor_data[i].acc_y = float(acc[1])
                                         self.sensor_data[i].acc_z = float(acc[2])
                                     
+                                    # Extract magnetometer
                                     if packet.containsCalibratedMagneticField():
                                         mag = packet.calibratedMagneticField()
                                         self.sensor_data[i].mag_x = float(mag[0])
                                         self.sensor_data[i].mag_y = float(mag[1])
                                         self.sensor_data[i].mag_z = float(mag[2])
                                     
+                                    # Extract free acceleration
                                     if packet.containsFreeAcceleration():
                                         free_acc = packet.freeAcceleration()
                                         self.sensor_data[i].free_acc_x = float(free_acc[0])
                                         self.sensor_data[i].free_acc_y = float(free_acc[1])
                                         self.sensor_data[i].free_acc_z = float(free_acc[2])
                                     
+                                    # Extract pressure
                                     if packet.containsPressure():
                                         pressure_obj = packet.pressure()
                                         self.sensor_data[i].pressure = int(pressure_obj.m_pressure)
                                     
+                                    # Extract status
                                     if packet.containsStatus():
                                         self.sensor_data[i].status = int(packet.status())
                                     
                                     # RSSI
                                     self.sensor_data[i].rssi = packet.rssi()
+                                    
+                                    # === Calculate Effective Update Rate (like C++ code) ===
+                                    if packet.containsFrameRange():
+                                        frame_range = packet.frameRange()
+                                        
+                                        # Determine the number of frames over which the SDI data 
+                                        # in this packet was determined
+                                        frame_skips = 0
+                                        
+                                        if frame_range.last() > frame_range.first():
+                                            # Normal case - no rollover
+                                            frame_skips = frame_range.last() - frame_range.first() - 1
+                                        else:
+                                            # Rollover (internal framecounter is unsigned 16 bits integer)
+                                            frame_skips = 65535 + frame_range.last() - frame_range.first() - 1
+                                        
+                                        # Update effective update rate using the method
+                                        self.sensor_data[i].update_effective_rate(frame_skips)
                                     
                                     # Write to CSV if recording
                                     if self.state == State.RECORDING and self.csv_writer is not None:
@@ -849,7 +875,7 @@ class MainWindow(QMainWindow):
             
             except Exception as e:
                 logging.error(f"Error in data collection: {e}", exc_info=True)
-    
+
     def update_mtw_display(self, mtw_index):
         """Update MTw display in GUI"""
         try:
