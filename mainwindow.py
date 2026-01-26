@@ -57,10 +57,14 @@ class MainWindow(QMainWindow):
     openPortSuccessful = pyqtSignal(object)
     openPortFailed = pyqtSignal(object)
     
-    # Add these new signals for MTW events
+    # MTW events
     mtwWirelessSignal = pyqtSignal(object)
     mtwDisconnectedSignal = pyqtSignal(object)
-    batteryLevelChangedSignal = pyqtSignal(object, int)  # NEW: device_id, battery_level
+    batteryLevelChangedSignal = pyqtSignal(object, int)
+    
+    # Measurement and progress events
+    measurementStartedSignal = pyqtSignal(object) 
+    progressUpdateSignal = pyqtSignal(object, int, int, str)
     
     def __init__(self, parent=None):
         # Call parent constructor FIRST
@@ -184,7 +188,11 @@ class MainWindow(QMainWindow):
         # MTW callback -> GUI signals
         self.mtwWirelessSignal.connect(self.handle_mtw_wireless)
         self.mtwDisconnectedSignal.connect(self.handle_mtw_disconnected)
-        self.batteryLevelChangedSignal.connect(self.handle_battery_level_changed)  # NEW
+        self.batteryLevelChangedSignal.connect(self.handle_battery_level_changed)
+        
+        # Measurement and progress signals
+        self.measurementStartedSignal.connect(self.handle_measurement_started)  # NEW
+        self.progressUpdateSignal.connect(self.handle_progress_update)  # NEW
     
     def create_signal_emitter(self, signal_name):
         """Create a signal emitter for callback events"""
@@ -357,6 +365,7 @@ class MainWindow(QMainWindow):
             self.ui.flushingCaptionLabel.setEnabled(True)
             self.ui.flushingProgressBar.setEnabled(True)
             self.ui.resetHeadingButton.setEnabled(False)
+            self.ui.startMeasurementButton.setEnabled(False)
             self.ui.stateDiagramLabel.setText("FLUSHING")
 
     def scan_ports(self):
@@ -517,7 +526,75 @@ class MainWindow(QMainWindow):
         
         except Exception as e:
             logging.error(f"Error in handle_mtw_disconnected: {e}", exc_info=True)
-    
+
+    def handle_measurement_started(self, device_id):
+        """Handle measurement started event from callback"""
+        try:
+            # Convert device_id to string
+            if hasattr(device_id, 'toString'):
+                device_id_str = device_id.toString()
+            elif hasattr(device_id, 'toXsString'):
+                device_id_str = device_id.toXsString()
+            else:
+                device_id_str = str(device_id)
+            
+            # Check if this is the wireless master
+            if self.wireless_master_device and str(self.wireless_master_device.deviceId()) == device_id_str:
+                # Check if we're returning from flushing/recording
+                if self.state in [State.RECORDING, State.FLUSHING]:
+                    self.log(f"Recording Finished. ID: {device_id_str}")
+                    
+                    # Close log file
+                    try:
+                        self.wireless_master_device.closeLogFile()
+                        self.log("MTB log file closed")
+                    except Exception as e:
+                        logging.error(f"Error closing log file: {e}", exc_info=True)
+                    
+                    # Close CSV file
+                    if self.csv_file is not None:
+                        try:
+                            self.csv_file.close()
+                            self.csv_file = None
+                            self.log("CSV file closed")
+                        except Exception as e:
+                            logging.error(f"Error closing CSV file: {e}", exc_info=True)
+                    
+                    # Return to measuring state
+                    self.state = State.MEASURING
+                    self.set_widgets_states()
+        
+        except Exception as e:
+            logging.error(f"Error in handle_measurement_started: {e}", exc_info=True)
+
+    def handle_progress_update(self, device_id, current, total, identifier):
+        """Handle progress update (e.g., flushing progress)"""
+        try:
+            if self.state == State.FLUSHING and identifier == "Flushing":
+                # Check if at highest update rate (nothing to flush)
+                if self.ui.allowedUpdateRatesComboBox.currentIndex() == 0:
+                    # Nothing to flush when at the highest update rate
+                    self.log("Flushing aborted (highest update rate - nothing to flush)")
+                    try:
+                        self.wireless_master_device.abortFlushing()
+                    except Exception as e:
+                        logging.error(f"Error aborting flushing: {e}", exc_info=True)
+                    return
+                
+                # Update progress bar
+                if total != 0 and self.ui.allowedUpdateRatesComboBox.currentIndex() != 0:
+                    # Only update progress bar if there is data to flush
+                    # and not at highest update rate
+                    self.ui.flushingProgressBar.setMaximum(total)
+                    self.ui.flushingProgressBar.setValue(current)
+                    
+                    # Log progress
+                    if current % 10 == 0 or current == total:  # Log every 10 packets or at completion
+                        logging.debug(f"Flushing progress: {current}/{total}")
+        
+        except Exception as e:
+            logging.error(f"Error in handle_progress_update: {e}", exc_info=True)
+
     def toggle_radio_enabled(self):
         """Toggle radio enabled/disabled"""
         channel = self.ui.channelComboBox.currentText()
@@ -723,21 +800,33 @@ class MainWindow(QMainWindow):
             self.log("Failed to start recording")
     
     def stop_recording(self):
-        """Stop recording"""
-        self.state = State.FLUSHING
-        self.wireless_master_device.stopRecording()
-        self.log("Stopping recording...")
-        
-        # Close CSV file
-        if self.csv_file is not None:
-            self.csv_file.close()
-            self.csv_file = None
-        
-        # Close MTB file
-        self.wireless_master_device.closeLogFile()
-        
-        self.state = State.MEASURING
-        self.set_widgets_states()
+        """Stop recording and start flushing"""
+        try:
+            # Transition to flushing state
+            self.state = State.FLUSHING
+            self.set_widgets_states()
+            
+            # Stop recording - this will trigger flushing automatically
+            self.wireless_master_device.stopRecording()
+            self.log("Stopping recording and flushing buffers...")
+            
+            # Note: Files will be closed in handle_measurement_started when flushing completes
+            # The device will automatically transition back to measurement mode after flushing
+            
+        except Exception as e:
+            logging.error(f"Error in stop_recording: {e}", exc_info=True)
+            self.log(f"ERROR: Failed to stop recording - {str(e)}")
+            
+            # Fallback: try to close files and return to measuring
+            if self.csv_file is not None:
+                try:
+                    self.csv_file.close()
+                    self.csv_file = None
+                except:
+                    pass
+            
+            self.state = State.MEASURING
+            self.set_widgets_states()
     
     def generate_log_filename(self, station_id):
         """Generate log filename"""

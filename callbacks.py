@@ -82,6 +82,9 @@ class WirelessMasterCallback(xda.XsCallback):
                     
             elif new_state == xda.XDS_Measurement:
                 logging.info(f"Device {device.deviceId()} started Measurement")
+                # Emit signal to handle measurement started
+                if self.main_window:
+                    self.main_window.measurementStartedSignal.emit(device.deviceId())
                 
             elif new_state == xda.XDS_WaitingForRecordingStart:
                 logging.info(f"Device {device.deviceId()} waiting for recording start")
@@ -98,6 +101,30 @@ class WirelessMasterCallback(xda.XsCallback):
             logging.error(f"Device error - ID: {device.deviceId()}, Error: {error}")
         except Exception as e:
             logging.error(f"Error in onError callback: {e}", exc_info=True)
+    
+    def onProgressUpdated(self, dev, current, total, identifier):
+        """
+        Called when progress is updated (e.g., during flushing)
+        """
+        try:
+            # Convert identifier to string
+            if hasattr(identifier, 'toStdString'):
+                identifier_str = identifier.toStdString()
+            elif hasattr(identifier, 'toString'):
+                identifier_str = identifier.toString()
+            else:
+                identifier_str = str(identifier)
+            
+            logging.debug(f"Progress update: {identifier_str} - {current}/{total}")
+            
+            # Emit signal to update GUI
+            if self.main_window:
+                self.main_window.progressUpdateSignal.emit(
+                    dev.deviceId(), current, total, identifier_str
+                )
+        
+        except Exception as e:
+            logging.error(f"Error in onProgressUpdated: {e}", exc_info=True)
 
 
 class MtwCallback(xda.XsCallback):
