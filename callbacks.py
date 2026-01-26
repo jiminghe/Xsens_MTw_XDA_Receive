@@ -95,8 +95,7 @@ class WirelessMasterCallback(xda.XsCallback):
     def onError(self, device, error):
         """Called when device error occurs"""
         try:
-            error_str = xda.XsResultValue_toString(error)
-            logging.error(f"Device error - ID: {device.deviceId()}, Error: {error_str}")
+            logging.error(f"Device error - ID: {device.deviceId()}, Error: {error}")
         except Exception as e:
             logging.error(f"Error in onError callback: {e}", exc_info=True)
 
@@ -107,13 +106,18 @@ class MtwCallback(xda.XsCallback):
     Buffers incoming data packets for processing
     """
     
-    def __init__(self, mtw_index, device):
+    def __init__(self, mtw_index, device, main_window=None):
         super().__init__()
         self.m_packet_buffer = deque(maxlen=300)
         self.m_mutex = Lock()
         self.m_mtw_index = mtw_index
         self.m_device = device
         self.packet_count = 0
+        self.main_window = main_window  # Reference to MainWindow for battery signal
+    
+    def set_main_window(self, main_window):
+        """Set reference to main window for signal emission"""
+        self.main_window = main_window
     
     def data_available(self):
         """Check if data is available in buffer (thread-safe)"""
@@ -176,5 +180,10 @@ class MtwCallback(xda.XsCallback):
             if request == xda.XIR_BatteryLevel:
                 battery_level = dev.batteryLevel()
                 logging.debug(f"MTW {self.m_mtw_index} battery level: {battery_level}%")
+                
+                # Emit signal to update GUI
+                if self.main_window:
+                    self.main_window.batteryLevelChangedSignal.emit(dev.deviceId(), battery_level)
+        
         except Exception as e:
             logging.error(f"Error in onInfoResponse: {e}", exc_info=True)

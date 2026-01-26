@@ -60,6 +60,7 @@ class MainWindow(QMainWindow):
     # Add these new signals for MTW events
     mtwWirelessSignal = pyqtSignal(object)
     mtwDisconnectedSignal = pyqtSignal(object)
+    batteryLevelChangedSignal = pyqtSignal(object, int)  # NEW: device_id, battery_level
     
     def __init__(self, parent=None):
         # Call parent constructor FIRST
@@ -80,7 +81,10 @@ class MainWindow(QMainWindow):
         self.wireless_master_callback = None
         self.wireless_master_device = None
         self.mtw_callbacks = []
-        self.mtw_devices = []
+        self.mtw_devices = []  # Store MTW devices for reset heading
+        
+        # Battery request tracking (like C++ code)
+        self.next_battery_request = 0  # Index of next MTW to request battery from
         
         # Data management
         self.sensor_data = []
@@ -164,7 +168,7 @@ class MainWindow(QMainWindow):
         # User -> GUI
         self.ui.enableButton.clicked.connect(self.toggle_radio_enabled)
         self.ui.startMeasurementButton.clicked.connect(self.toggle_measurement)
-        self.ui.resetHeadingButton.clicked.connect(self.reset_heading)  # NEW
+        self.ui.resetHeadingButton.clicked.connect(self.reset_heading)
         self.ui.recordingButton.clicked.connect(self.toggle_recording)
         self.ui.clearLogPushButton.clicked.connect(self.clear_log_window)
         self.ui.connectedMtwList.itemClicked.connect(self.clear_connected_mtw_data_labels)
@@ -180,6 +184,7 @@ class MainWindow(QMainWindow):
         # MTW callback -> GUI signals
         self.mtwWirelessSignal.connect(self.handle_mtw_wireless)
         self.mtwDisconnectedSignal.connect(self.handle_mtw_disconnected)
+        self.batteryLevelChangedSignal.connect(self.handle_battery_level_changed)  # NEW
     
     def create_signal_emitter(self, signal_name):
         """Create a signal emitter for callback events"""
@@ -618,7 +623,7 @@ class MainWindow(QMainWindow):
         
         self.log("Attaching callback handlers to MTWs...")
         self.mtw_callbacks = [
-            MtwCallback(i, mtw_devices[i]) for i in range(len(mtw_devices))
+            MtwCallback(i, mtw_devices[i], self) for i in range(len(mtw_devices))  # Pass self
         ]
         
         for i in range(len(mtw_devices)):
@@ -639,6 +644,9 @@ class MainWindow(QMainWindow):
         
         # Initialize duplicate filter
         self.duplicate_filter = DuplicatePacketFilter(len(self.mtw_callbacks))
+        
+        # Reset battery request iterator
+        self.next_battery_request = 0
         
         self.state = State.MEASURING
         self.set_widgets_states()
@@ -663,6 +671,9 @@ class MainWindow(QMainWindow):
         
         # Clear device reference
         self.mtw_devices = []
+        
+        # Reset battery request iterator
+        self.next_battery_request = 0
         
         self.state = State.OPERATIONAL
         self.set_widgets_states()
@@ -890,9 +901,69 @@ class MainWindow(QMainWindow):
                 self.display_mtw_data(mtw_data)
     
     def request_battery_levels(self):
-        """Request battery levels from MTws"""
-        # TODO: Implement battery level requests cycling through MTws
-        pass
+            """
+            Request battery levels from MTWs (cycle through them one at a time)
+            This mimics the C++ implementation
+            """
+            try:
+                with self.mutex:
+                    # Only request battery if we're measuring
+                    if self.state not in [State.MEASURING, State.RECORDING]:
+                        return
+                    
+                    # Check if we have any MTW callbacks
+                    if not self.mtw_callbacks or len(self.mtw_callbacks) == 0:
+                        return
+                    
+                    # Reset iterator if needed
+                    if self.next_battery_request >= len(self.mtw_callbacks):
+                        self.next_battery_request = 0
+                    
+                    # Request battery from next MTW
+                    if self.next_battery_request < len(self.mtw_callbacks):
+                        device = self.mtw_callbacks[self.next_battery_request].device()
+                        device.requestBatteryLevel()
+                        logging.debug(f"Requested battery level from MTW {self.next_battery_request}")
+                        
+                        # Move to next MTW for next request
+                        self.next_battery_request += 1
+            
+            except Exception as e:
+                logging.error(f"Error requesting battery levels: {e}", exc_info=True)
+
+    def handle_battery_level_changed(self, device_id, battery_level):
+        """Handle battery level changed event"""
+        try:
+            # Convert device_id to string
+            if hasattr(device_id, 'toString'):
+                mtw_id_str = device_id.toString()
+            elif hasattr(device_id, 'toXsString'):
+                mtw_id_str = device_id.toXsString()
+            else:
+                mtw_id_str = str(device_id)
+            
+            logging.debug(f"Battery level changed: {mtw_id_str} = {battery_level}%")
+            
+            # Find MTw in list
+            items = self.ui.connectedMtwList.findItems(mtw_id_str, Qt.MatchFixedString)
+            
+            if items:
+                item = items[0]
+                mtw_data = item.data(Qt.UserRole)
+                
+                if mtw_data is not None and isinstance(mtw_data, ConnectedMTwData):
+                    # Update battery level
+                    mtw_data.battery_level = battery_level
+                    
+                    # Store back in item
+                    item.setData(Qt.UserRole, mtw_data)
+                    
+                    # If this MTw is currently selected, update display
+                    if self.ui.connectedMtwList.currentItem() == item:
+                        self.display_mtw_data(mtw_data)
+        
+        except Exception as e:
+            logging.error(f"Error handling battery level changed: {e}", exc_info=True)
 
     def reset_heading(self):
             """Reset heading (yaw) for all MTW sensors"""
